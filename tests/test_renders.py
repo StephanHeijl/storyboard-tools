@@ -89,3 +89,22 @@ def test_render_finalization_claim_is_atomic_and_releasable(service) -> None:
     assert service.claim_render_finalization(render["render_id"], "worker-2") is False
     service.release_render_finalization(render["render_id"], "worker-1")
     assert service.claim_render_finalization(render["render_id"], "worker-2") is True
+
+
+def test_render_finalization_claim_can_take_over_an_expired_lease(service) -> None:
+    render = service.plan_render("v1", 10)
+    service.transition_render(render["render_id"], "queued", comfy_prompt_id="prompt-1")
+    service.transition_render(render["render_id"], "running")
+    assert service.claim_render_finalization(render["render_id"], "worker-1") is True
+    with service.database.connect() as connection:
+        connection.execute(
+            "UPDATE render_finalization_claims SET claimed_at = '2000-01-01T00:00:00+00:00' WHERE render_id = ?",
+            (render["render_id"],),
+        )
+
+    assert service.claim_render_finalization(render["render_id"], "worker-2", lease_seconds=60) is True
+    with service.database.connect() as connection:
+        owner = connection.execute(
+            "SELECT worker_id FROM render_finalization_claims WHERE render_id = ?", (render["render_id"],)
+        ).fetchone()[0]
+    assert owner == "worker-2"

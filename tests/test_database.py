@@ -5,6 +5,8 @@ import sqlite3
 import pytest
 
 from storyboardctl.database import Database
+from storyboardctl.models import ProjectSpec, ShotSpec, StoryboardSpec
+from storyboardctl.service import StoryboardService
 
 
 def test_initialize_is_idempotent_and_enables_safety_pragmas(tmp_path) -> None:
@@ -79,3 +81,34 @@ def test_foreign_keys_and_event_idempotency_are_enforced(tmp_path) -> None:
                 "idempotency_key, created_at) VALUES ('e2', 1, 'sample', '{}', "
                 "'same-key', 'now')"
             )
+
+
+def test_migration_backfills_superseded_revision_render_provenance(tmp_path) -> None:
+    database = Database(tmp_path / "storyboard.db")
+    database.initialize()
+    service = StoryboardService(database, tmp_path)
+    service.import_spec(
+        ProjectSpec(
+            slug="legacy",
+            title="Legacy",
+            storyboard=StoryboardSpec(
+                name="v1",
+                title="V1",
+                shots=[ShotSpec(key="shot", title="Shot", description="Shot", prompt="Old", duration_seconds=1)],
+            ),
+        )
+    )
+    legacy_render = service.plan_render("v1", 10)
+    service.revise_shot("v1", 10, {"prompt": "New"})
+
+    with database.connect() as connection:
+        connection.execute("DROP TABLE render_finalization_claims")
+        connection.execute("ALTER TABLE renders DROP COLUMN position_snapshot")
+        connection.execute("ALTER TABLE renders DROP COLUMN version_id")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 3")
+
+    database.initialize()
+    migrated_service = StoryboardService(database, tmp_path)
+
+    renders = migrated_service.list_renders(version_name="v1", position=10)
+    assert [item["render_id"] for item in renders] == [legacy_render["render_id"]]

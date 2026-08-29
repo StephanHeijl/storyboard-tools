@@ -248,10 +248,16 @@ ALTER TABLE renders ADD COLUMN version_id TEXT REFERENCES storyboard_versions(id
 ALTER TABLE renders ADD COLUMN position_snapshot INTEGER CHECK (position_snapshot IS NULL OR position_snapshot > 0);
 
 UPDATE renders SET version_id = (
-    SELECT MIN(vs.version_id) FROM version_shots vs WHERE vs.revision_id = renders.revision_id
+    SELECT MIN(vs.version_id)
+    FROM shot_revisions sr
+    JOIN version_shots vs ON vs.shot_id = sr.shot_id
+    WHERE sr.id = renders.revision_id
 ) WHERE version_id IS NULL;
 UPDATE renders SET position_snapshot = (
-    SELECT MIN(vs.position) FROM version_shots vs WHERE vs.revision_id = renders.revision_id
+    SELECT MIN(vs.position)
+    FROM shot_revisions sr
+    JOIN version_shots vs ON vs.shot_id = sr.shot_id AND vs.version_id = renders.version_id
+    WHERE sr.id = renders.revision_id
 ) WHERE position_snapshot IS NULL;
 
 CREATE TABLE render_finalization_claims (

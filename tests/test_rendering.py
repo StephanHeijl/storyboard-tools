@@ -258,7 +258,7 @@ def test_reconcile_marks_non_timeout_failure_failed(tmp_path) -> None:
     assert details["error_message"] == "ComfyUI execution failed"
 
 
-def test_wait_observes_another_workers_success_without_contacting_comfy(tmp_path, monkeypatch) -> None:
+def test_wait_retries_finalization_claim_after_other_worker_releases(tmp_path, monkeypatch) -> None:
     database = Database(tmp_path / "storyboard.db")
     database.initialize()
     service = StoryboardService(database, tmp_path)
@@ -287,14 +287,11 @@ def test_wait_observes_another_workers_success_without_contacting_comfy(tmp_path
     service.transition_render(planned["render_id"], "running")
     assert service.claim_render_finalization(planned["render_id"], "worker-1") is True
 
-    def finish_during_poll(_seconds: float) -> None:
-        output = tmp_path / planned["output_path"]
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_bytes(b"completed-by-worker-1")
-        service.complete_render(planned["render_id"], duration_seconds=1.1)
+    def release_during_poll(_seconds: float) -> None:
         service.release_render_finalization(planned["render_id"], "worker-1")
 
-    monkeypatch.setattr("storyboardctl.rendering.time.sleep", finish_during_poll)
+    monkeypatch.setattr("storyboardctl.rendering.time.sleep", release_during_poll)
+    monkeypatch.setattr("storyboardctl.rendering.probe_duration", lambda _path: 1.1)
     comfy = FakeComfy()
 
     result = RenderRunner(service, comfy, {"fake": FakeAdapter()}).wait(
@@ -302,4 +299,4 @@ def test_wait_observes_another_workers_success_without_contacting_comfy(tmp_path
     )
 
     assert result["state"] == "completed"
-    assert comfy.wait_calls == 0
+    assert comfy.wait_calls == 1

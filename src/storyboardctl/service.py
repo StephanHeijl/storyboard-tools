@@ -1070,7 +1070,6 @@ class StoryboardService:
         if not staged.is_file():
             raise ExternalServiceFailure("ffmpeg completed without creating a continuity frame")
         digest = file_sha256(staged)
-        installed_destination = False
         if destination.exists():
             if file_sha256(destination) != digest:
                 staged.unlink(missing_ok=True)
@@ -1079,7 +1078,6 @@ class StoryboardService:
         else:
             try:
                 os.link(staged, destination)
-                installed_destination = True
             except FileExistsError as error:
                 if file_sha256(destination) != digest:
                     staged.unlink(missing_ok=True)
@@ -1176,14 +1174,9 @@ class StoryboardService:
                 )
                 return result
         except Exception:
-            if installed_destination:
-                with self.database.connect() as connection:
-                    referenced = connection.execute(
-                        "SELECT 1 FROM assets WHERE production_id = 1 AND path = ?",
-                        (relative_path,),
-                    ).fetchone()
-                if referenced is None and destination.is_file() and file_sha256(destination) == digest:
-                    destination.unlink(missing_ok=True)
+            # A published frame is immutable and safe to adopt on a retry. Never
+            # remove it here: another bridge transaction may already have observed
+            # the path and be about to commit its asset row.
             raise
 
     def _plan_render_for_revision(
@@ -1374,21 +1367,41 @@ class StoryboardService:
             self._event(connection, "render.transitioned", result, entity_type="render", entity_id=render_id)
             return result
 
-    def claim_render_finalization(self, render_id: str, worker_id: str) -> bool:
+    def claim_render_finalization(self, render_id: str, worker_id: str, *, lease_seconds: float = 300) -> bool:
+        if lease_seconds <= 0:
+            raise Conflict("render finalization lease must be positive")
         with self.database.transaction(write=True) as connection:
             render = self._render_row(connection, render_id)
             if render["state"] == "completed":
                 return False
             if render["state"] not in ("queued", "running", "timed_out"):
                 raise Conflict(f"render cannot be finalized from state: {render['state']}")
-            try:
+            claim = connection.execute(
+                "SELECT worker_id, claimed_at FROM render_finalization_claims WHERE render_id = ?",
+                (render_id,),
+            ).fetchone()
+            now = datetime.now(UTC)
+            if claim is None:
                 connection.execute(
                     "INSERT INTO render_finalization_claims(render_id, worker_id, claimed_at) VALUES (?, ?, ?)",
-                    (render_id, worker_id, _now()),
+                    (render_id, worker_id, now.isoformat()),
                 )
-            except sqlite3.IntegrityError:
+                return True
+            if claim["worker_id"] == worker_id:
+                connection.execute(
+                    "UPDATE render_finalization_claims SET claimed_at = ? WHERE render_id = ? AND worker_id = ?",
+                    (now.isoformat(), render_id, worker_id),
+                )
+                return True
+            claimed_at = datetime.fromisoformat(str(claim["claimed_at"]))
+            if (now - claimed_at).total_seconds() < lease_seconds:
                 return False
-            return True
+            updated = connection.execute(
+                "UPDATE render_finalization_claims SET worker_id = ?, claimed_at = ? "
+                "WHERE render_id = ? AND worker_id = ? AND claimed_at = ?",
+                (worker_id, now.isoformat(), render_id, claim["worker_id"], claim["claimed_at"]),
+            )
+            return updated.rowcount == 1
 
     def release_render_finalization(self, render_id: str, worker_id: str) -> None:
         with self.database.transaction(write=True) as connection:

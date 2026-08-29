@@ -139,9 +139,24 @@ class RenderRunner:
         if not prompt_id:
             raise Conflict("render has no ComfyUI prompt ID to wait for")
         worker_id = str(uuid.uuid4())
-        if not self.service.claim_render_finalization(render_id, worker_id):
+        try:
+            current_state = self.service.render_details(render_id)["state"]
+            if current_state in ("queued", "timed_out"):
+                try:
+                    self.service.transition_render(render_id, "running")
+                except Conflict:
+                    current_state = self.service.render_details(render_id)["state"]
+                    if current_state == "completed":
+                        return self.service.render_details(render_id)
+                    if current_state != "running":
+                        raise
+            history = self.comfy.wait_for_completion(
+                prompt_id,
+                timeout_seconds=timeout_seconds,
+                poll_seconds=poll_seconds,
+            )
             deadline = time.monotonic() + timeout_seconds
-            while time.monotonic() <= deadline:
+            while not self.service.claim_render_finalization(render_id, worker_id):
                 current = self.service.render_details(render_id)
                 if current["state"] == "completed":
                     return current
@@ -150,20 +165,15 @@ class RenderRunner:
                         f"render finalization ended in state {current['state']}",
                         details=self._error_context(current),
                     )
+                if time.monotonic() > deadline:
+                    raise ExternalServiceFailure(
+                        f"timed out waiting for another worker to finalize render {render_id}",
+                        details=self._error_context(current),
+                    )
                 time.sleep(poll_seconds if poll_seconds > 0 else 0.05)
-            raise ExternalServiceFailure(
-                f"timed out waiting for another worker to finalize render {render_id}",
-                details=self._error_context(self.service.render_details(render_id)),
-            )
-        try:
-            current_state = self.service.render_details(render_id)["state"]
-            if current_state in ("queued", "timed_out"):
-                self.service.transition_render(render_id, "running")
-            history = self.comfy.wait_for_completion(
-                prompt_id,
-                timeout_seconds=timeout_seconds,
-                poll_seconds=poll_seconds,
-            )
+            current = self.service.render_details(render_id)
+            if current["state"] == "completed":
+                return current
             output_path = resolve_project_path(self.service.project_root, details["output_path"])
             self.comfy.download(history, output_path)
             duration = probe_duration(output_path)
