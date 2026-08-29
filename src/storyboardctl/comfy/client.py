@@ -76,20 +76,22 @@ class ComfyClient:
         except httpx.HTTPError as error:
             raise ExternalServiceFailure(f"ComfyUI request failed: {method} {path}: {error}") from error
 
-    def upload_image(self, image_path: Path) -> str:
-        media_type = mimetypes.guess_type(image_path.name)[0] or "application/octet-stream"
+    def upload_image(self, image_path: Path, *, remote_name: str | None = None) -> str:
+        upload_name = remote_name or image_path.name
+        media_type = mimetypes.guess_type(upload_name)[0] or "application/octet-stream"
         with image_path.open("rb") as stream:
             response = self._request(
                 "POST",
                 "/upload/image",
-                files={"image": (image_path.name, stream, media_type)},
-                data={"overwrite": "true"},
+                files={"image": (upload_name, stream, media_type)},
+                data={"overwrite": "false", "subfolder": "storyboardctl"},
             )
         payload = response.json()
         name = payload.get("name")
         if not isinstance(name, str) or not name:
             raise ExternalServiceFailure("ComfyUI image upload returned no filename")
-        return name
+        subfolder = payload.get("subfolder")
+        return f"{subfolder}/{name}" if isinstance(subfolder, str) and subfolder else name
 
     def enqueue(self, workflow: dict[str, dict[str, Any]]) -> str:
         payload = self._request(
@@ -130,15 +132,27 @@ class ComfyClient:
 
     def download(self, history_entry: dict[str, Any], destination: Path) -> Path:
         item = discover_video_output(history_entry.get("outputs", {}))
-        response = self._request(
-            "GET",
-            "/view",
-            params={
-                "filename": item["filename"],
-                "subfolder": item.get("subfolder", ""),
-                "type": item.get("type", "output"),
-            },
-        )
         destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(response.content)
+        staged = destination.with_suffix(destination.suffix + ".part")
+        url = f"{self.settings.base_url.rstrip('/')}/view"
+        try:
+            with self.http.stream(
+                "GET",
+                url,
+                params={
+                    "filename": item["filename"],
+                    "subfolder": item.get("subfolder", ""),
+                    "type": item.get("type", "output"),
+                },
+            ) as response:
+                response.raise_for_status()
+                with staged.open("wb") as stream:
+                    for chunk in response.iter_bytes():
+                        stream.write(chunk)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+            staged.replace(destination)
+        except (OSError, httpx.HTTPError) as error:
+            staged.unlink(missing_ok=True)
+            raise ExternalServiceFailure(f"ComfyUI download failed: {error}") from error
         return destination

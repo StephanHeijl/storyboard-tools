@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import math
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from storyboardctl.comfy.adapters import WorkflowAdapter, WorkflowContext
 from storyboardctl.compiler import probe_duration
@@ -14,7 +14,7 @@ from storyboardctl.service import StoryboardService
 
 
 class ComfyInterface(Protocol):
-    def upload_image(self, image_path: Path) -> str: ...
+    def upload_image(self, image_path: Path, *, remote_name: str | None = None) -> str: ...
 
     def enqueue(self, workflow: dict[str, dict[str, Any]]) -> str: ...
 
@@ -59,9 +59,14 @@ class RenderRunner:
         last_frame: str | None = None
         try:
             for asset in details["assets"]:
-                self.service.verify_asset(asset["asset_key"])
+                verified = self.service.verify_asset(asset["asset_key"])
                 absolute = resolve_project_path(self.service.project_root, asset["path"], must_exist=True)
-                uploaded = self.comfy.upload_image(absolute)
+                if asset["role"] not in ("reference", "first_frame", "last_frame"):
+                    continue
+                if asset["kind"] != "image":
+                    raise Conflict(f"asset role {asset['role']} requires an image: {asset['asset_key']}")
+                remote_name = f"{verified['sha256'][:16]}-{absolute.name}"
+                uploaded = self.comfy.upload_image(absolute, remote_name=remote_name)
                 if asset["role"] == "reference":
                     references.append(uploaded)
                 elif asset["role"] == "first_frame":
@@ -83,7 +88,7 @@ class RenderRunner:
                 first_frame=first_frame,
                 last_frame=last_frame,
             )
-            workflow = adapter.build_workflow(context)
+            workflow = self._workflow_for(details, adapter, context)
             snapshot = adapter.scrub_workflow(workflow)
             workflow_path = resolve_project_path(self.service.project_root, details["workflow_path"])
             workflow_path.parent.mkdir(parents=True, exist_ok=True)
@@ -103,7 +108,65 @@ class RenderRunner:
         except Exception as error:
             current = self.service.render_details(render_id)
             if current["state"] in ("planned", "queued", "running"):
-                self.service.transition_render(render_id, "failed", error_message=str(error))
+                next_state = (
+                    "timed_out"
+                    if isinstance(error, ExternalServiceFailure)
+                    and "timed out" in str(error).lower()
+                    and current["comfy_prompt_id"]
+                    else "failed"
+                )
+                self.service.transition_render(render_id, next_state, error_message=str(error))
             if isinstance(error, (Conflict, NotFound, ExternalServiceFailure)):
                 raise
             raise ExternalServiceFailure(f"render execution failed: {error}") from error
+
+    def _workflow_for(
+        self,
+        details: dict[str, Any],
+        adapter: WorkflowAdapter,
+        context: WorkflowContext,
+    ) -> dict[str, dict[str, Any]]:
+        if details.get("replay_workflow") and details.get("source_render_id"):
+            source = self.service.render_details(details["source_render_id"])
+            source_path = resolve_project_path(self.service.project_root, source["workflow_path"], must_exist=True)
+            workflow = cast(
+                dict[str, dict[str, Any]],
+                json.loads(source_path.read_text(encoding="utf-8")),
+            )
+            if "7" in workflow and "noise_seed" in workflow["7"].get("inputs", {}):
+                workflow["7"]["inputs"]["noise_seed"] = context.seed
+            if "15" in workflow and "filename_prefix" in workflow["15"].get("inputs", {}):
+                prior = str(workflow["15"]["inputs"]["filename_prefix"])
+                prefix = prior.rsplit("/", 1)[0] if "/" in prior else "video/storyboardctl"
+                workflow["15"]["inputs"]["filename_prefix"] = f"{prefix}/{context.output_key}"
+            return workflow
+        return adapter.build_workflow(context)
+
+    def reconcile(
+        self,
+        render_id: str,
+        *,
+        timeout_seconds: float = 1800,
+        poll_seconds: float = 3,
+    ) -> dict[str, Any]:
+        details = self.service.render_details(render_id)
+        if details["state"] not in ("queued", "running", "timed_out"):
+            raise Conflict(f"render cannot be reconciled from state: {details['state']}")
+        prompt_id = details.get("comfy_prompt_id")
+        if not prompt_id:
+            raise Conflict("render has no ComfyUI prompt ID to reconcile")
+        if details["state"] == "timed_out":
+            self.service.transition_render(render_id, "running")
+        try:
+            history = self.comfy.wait_for_completion(
+                prompt_id, timeout_seconds=timeout_seconds, poll_seconds=poll_seconds
+            )
+            output_path = resolve_project_path(self.service.project_root, details["output_path"])
+            self.comfy.download(history, output_path)
+            return self.service.complete_render(render_id, duration_seconds=probe_duration(output_path))
+        except Exception as error:
+            if isinstance(error, ExternalServiceFailure) and "timed out" in str(error).lower():
+                current = self.service.render_details(render_id)
+                if current["state"] == "running":
+                    self.service.transition_render(render_id, "timed_out", error_message=str(error))
+            raise

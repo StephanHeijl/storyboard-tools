@@ -209,10 +209,21 @@ class Compiler:
                     ),
                 )
         destination = resolve_project_path(self.project_root, manifest_path)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        temporary = destination.with_suffix(".json.tmp")
-        temporary.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        temporary.replace(destination)
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            temporary = destination.with_suffix(".json.tmp")
+            temporary.write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            temporary.replace(destination)
+        except OSError as error:
+            with self.database.transaction(write=True) as connection:
+                connection.execute(
+                    "UPDATE compilations SET state = 'failed', error_message = ? WHERE id = ?",
+                    (str(error), compilation_id),
+                )
+            raise IntegrityFailure(f"could not persist compilation manifest: {error}") from error
         return manifest
 
     def build(self, version_name: str, settings: CompilationSettings | None = None) -> dict[str, Any]:
@@ -229,6 +240,10 @@ class Compiler:
                 normalized: list[Path] = []
                 for item in manifest["items"]:
                     source = resolve_project_path(self.project_root, item["source_path"], must_exist=True)
+                    staged_source = temp_root / f"source_{item['order']:04d}{source.suffix}"
+                    shutil.copyfile(source, staged_source)
+                    if file_sha256(staged_source) != item["source_sha256"]:
+                        raise IntegrityFailure(f"source hash changed before assembly for shot {item['position']}")
                     duration = float(item["duration_seconds"])
                     target = temp_root / f"shot_{item['order']:04d}.mp4"
                     command = [
@@ -238,10 +253,10 @@ class Compiler:
                         "error",
                         "-y",
                         "-i",
-                        str(source),
+                        str(staged_source),
                     ]
                     audio_input = "0:a:0"
-                    if not _has_audio(source):
+                    if not _has_audio(staged_source):
                         command.extend(
                             [
                                 "-f",
@@ -303,6 +318,13 @@ class Compiler:
                     text=True,
                 )
                 shutil.copyfile(staged_output, output)
+        except IntegrityFailure as error:
+            with self.database.transaction(write=True) as connection:
+                connection.execute(
+                    "UPDATE compilations SET state = 'failed', error_message = ? WHERE id = ?",
+                    (str(error), compilation_id),
+                )
+            raise
         except (OSError, subprocess.CalledProcessError) as error:
             detail = getattr(error, "stderr", "") or str(error)
             with self.database.transaction(write=True) as connection:

@@ -99,7 +99,7 @@ def _execute(context: typer.Context, operation: Callable[[], Any]) -> None:
             err=True,
         )
         raise typer.Exit(ValidationFailure.exit_code) from error
-    except json.JSONDecodeError as error:
+    except (json.JSONDecodeError, ValueError) as error:
         typer.echo(
             json_text({"code": "validation_error", "message": str(error), "details": {}}),
             err=True,
@@ -333,7 +333,7 @@ def _execute_or_return_plan(
     timeout_seconds: float,
     poll_seconds: float,
 ) -> dict[str, Any]:
-    if plan_only:
+    if plan_only or planned.get("state") != "planned":
         return planned
     return _render_runner(service).execute(
         planned["render_id"],
@@ -352,13 +352,20 @@ def render_shot(
     plan_only: bool = typer.Option(False, "--plan-only"),
     timeout_seconds: float = typer.Option(1800, "--timeout"),
     poll_seconds: float = typer.Option(3, "--poll-seconds"),
+    idempotency_key: str | None = typer.Option(None, "--idempotency-key"),
 ) -> None:
     def operation() -> dict[str, Any]:
         service = _service(context)
         parsed_settings = json.loads(settings)
         if not isinstance(parsed_settings, dict):
             raise ValidationFailure("--settings must contain a JSON object")
-        planned = service.plan_render(version, position, seed=seed, settings=parsed_settings)
+        planned = service.plan_render(
+            version,
+            position,
+            seed=seed,
+            settings=parsed_settings,
+            idempotency_key=idempotency_key,
+        )
         return _execute_or_return_plan(
             service,
             planned,
@@ -402,6 +409,20 @@ def render_rerender(
 @render_app.command("status")
 def render_status(context: typer.Context, render_id: str) -> None:
     _execute(context, lambda: _service(context).render_details(render_id))
+
+
+@render_app.command("reconcile")
+def render_reconcile(
+    context: typer.Context,
+    render_id: str,
+    timeout_seconds: float = typer.Option(1800, "--timeout"),
+    poll_seconds: float = typer.Option(3, "--poll-seconds"),
+) -> None:
+    def operation() -> dict[str, Any]:
+        service = _service(context)
+        return _render_runner(service).reconcile(render_id, timeout_seconds=timeout_seconds, poll_seconds=poll_seconds)
+
+    _execute(context, operation)
 
 
 @review_app.command("approve")

@@ -47,6 +47,14 @@ def test_render_attempts_are_monotonic_and_paths_never_collide(service) -> None:
     assert first["workflow_path"] != second["workflow_path"]
 
 
+def test_render_planning_replays_an_idempotent_agent_retry(service) -> None:
+    first = service.plan_render("v1", 10, idempotency_key="agent-render-1")
+    replay = service.plan_render("v1", 10, idempotency_key="agent-render-1")
+    assert replay == first
+    with service.database.connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM renders").fetchone()[0] == 1
+
+
 def test_retry_is_exact_and_rerender_uses_replacement_seed(service) -> None:
     original = service.plan_render("v1", 10, seed=123, settings={"steps": 8})
     retry = service.retry_render(original["render_id"])

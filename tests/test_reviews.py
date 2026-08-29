@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import pytest
+
 from storyboardctl.database import Database
+from storyboardctl.errors import Conflict
 from storyboardctl.models import ProjectSpec, ShotSpec, StoryboardSpec
 from storyboardctl.service import StoryboardService
 
@@ -55,3 +58,25 @@ def test_approval_supersedes_history_carries_to_clone_and_not_revision(tmp_path)
         "approved",
         "rejected",
     ]
+
+
+def test_approval_requires_completed_output_provenance(tmp_path) -> None:
+    database = Database(tmp_path / "storyboard.db")
+    database.initialize()
+    service = StoryboardService(database, tmp_path)
+    service.import_spec(
+        ProjectSpec(
+            slug="incomplete",
+            title="Incomplete",
+            storyboard=StoryboardSpec(
+                name="v1",
+                title="V1",
+                shots=[ShotSpec(key="s", title="S", description="S", prompt="S", duration_seconds=1)],
+            ),
+        )
+    )
+    render = service.plan_render("v1", 10)
+    with database.transaction(write=True) as connection:
+        connection.execute("UPDATE renders SET state = 'completed' WHERE id = ?", (render["render_id"],))
+    with pytest.raises(Conflict, match="provenance"):
+        service.approve_render(render["render_id"])

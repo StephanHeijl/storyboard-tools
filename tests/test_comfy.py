@@ -45,7 +45,10 @@ def test_upload_enqueue_poll_and_download(tmp_path) -> None:
     client = ComfyClient(settings, http_client=http)
     image = tmp_path / "frame.png"
     image.write_bytes(b"png")
-    assert client.upload_image(image) == "uploaded.png"
+    assert client.upload_image(image, remote_name="abc123-frame.png") == "uploaded.png"
+    upload_body = requests[0].content.decode("utf-8", errors="ignore")
+    assert 'filename="abc123-frame.png"' in upload_body
+    assert "false" in upload_body
     prompt_id = client.enqueue({"1": {"class_type": "SaveVideo", "inputs": {}}})
     result = client.wait_for_completion(prompt_id, poll_seconds=0, timeout_seconds=1)
     target = tmp_path / "clip.mp4"
@@ -81,3 +84,16 @@ def test_execution_errors_and_missing_outputs_are_clear() -> None:
 def test_video_discovery_is_recursive() -> None:
     output = {"a": [{"nested": {"filename": "ignore.png"}}, {"filename": "movie.webm"}]}
     assert discover_video_output(output)["filename"] == "movie.webm"
+
+
+def test_download_streams_to_a_staged_file(tmp_path) -> None:
+    client = ComfyClient(
+        ComfySettings(base_url="http://comfy.test"),
+        http_client=httpx.Client(
+            transport=httpx.MockTransport(lambda _request: httpx.Response(200, content=b"large-video"))
+        ),
+    )
+    target = tmp_path / "result.mp4"
+    client.download({"outputs": {"x": {"filename": "result.mp4"}}}, target)
+    assert target.read_bytes() == b"large-video"
+    assert not target.with_suffix(".mp4.part").exists()

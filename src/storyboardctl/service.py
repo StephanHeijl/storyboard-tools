@@ -781,6 +781,7 @@ class StoryboardService:
         seed: int,
         settings: dict[str, Any],
         source_render_id: str | None = None,
+        replay_workflow: bool = False,
     ) -> dict[str, Any]:
         revision = connection.execute("SELECT prompt FROM shot_revisions WHERE id = ?", (revision_id,)).fetchone()
         if revision is None:
@@ -799,8 +800,8 @@ class StoryboardService:
         workflow_path = f"renders/{safe_label}/{stem}_workflow.json"
         connection.execute(
             "INSERT INTO renders(id, revision_id, attempt_number, state, seed, prompt_snapshot, "
-            "settings_json, workflow_path, output_path, source_render_id, created_at) "
-            "VALUES (?, ?, ?, 'planned', ?, ?, ?, ?, ?, ?, ?)",
+            "settings_json, workflow_path, output_path, source_render_id, replay_workflow, created_at) "
+            "VALUES (?, ?, ?, 'planned', ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 render_id,
                 revision_id,
@@ -811,6 +812,7 @@ class StoryboardService:
                 workflow_path,
                 output_path,
                 source_render_id,
+                int(replay_workflow),
                 _now(),
             ),
         )
@@ -833,8 +835,17 @@ class StoryboardService:
         *,
         seed: int | None = None,
         settings: dict[str, Any] | None = None,
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         with self.database.transaction(write=True) as connection:
+            replay = self._existing_idempotent(connection, idempotency_key)
+            if replay is not None:
+                current = connection.execute(
+                    "SELECT state FROM renders WHERE id = ?", (replay.get("render_id"),)
+                ).fetchone()
+                if current is not None:
+                    replay["state"] = current["state"]
+                return replay
             version = self._version(connection, version_name)
             row = self._active_shot_row(connection, version["id"], position)
             merged_settings = json.loads(row["render_settings_json"])
@@ -857,6 +868,7 @@ class StoryboardService:
                 result,
                 entity_type="render",
                 entity_id=result["render_id"],
+                idempotency_key=idempotency_key,
             )
             return result
 
@@ -877,6 +889,7 @@ class StoryboardService:
                 seed=int(source["seed"]),
                 settings=json.loads(source["settings_json"]),
                 source_render_id=render_id,
+                replay_workflow=True,
             )
             self._event(connection, "render.retried", result, entity_type="render", entity_id=result["render_id"])
             return result
@@ -907,7 +920,8 @@ class StoryboardService:
         allowed = {
             "planned": {"queued", "failed", "cancelled"},
             "queued": {"running", "completed", "failed", "cancelled"},
-            "running": {"completed", "failed", "cancelled"},
+            "running": {"timed_out", "completed", "failed", "cancelled"},
+            "timed_out": {"running", "completed", "failed", "cancelled"},
             "completed": set(),
             "failed": set(),
             "cancelled": set(),
@@ -945,20 +959,32 @@ class StoryboardService:
             raise Conflict(f"invalid render transition: {row['state']} -> completed")
         output = resolve_project_path(self.project_root, row["output_path"], must_exist=True)
         digest = file_sha256(output)
-        result = self.transition_render(render_id, "completed")
         with self.database.transaction(write=True) as connection:
+            current = self._render_row(connection, render_id)
+            if current["state"] not in ("queued", "running"):
+                raise Conflict(f"invalid render transition: {current['state']} -> completed")
+            now = _now()
             connection.execute(
-                "UPDATE renders SET output_sha256 = ?, duration_seconds = ? WHERE id = ?",
-                (digest, duration_seconds, render_id),
+                "UPDATE renders SET state = 'completed', output_sha256 = ?, duration_seconds = ?, "
+                "completed_at = ? WHERE id = ?",
+                (digest, duration_seconds, now, render_id),
             )
-        result.update(
-            {
-                "output_path": row["output_path"],
+            result = {
+                "render_id": render_id,
+                "state": "completed",
+                "comfy_prompt_id": current["comfy_prompt_id"],
+                "output_path": current["output_path"],
                 "output_sha256": digest,
                 "duration_seconds": duration_seconds,
             }
-        )
-        return result
+            self._event(
+                connection,
+                "render.completed",
+                result,
+                entity_type="render",
+                entity_id=render_id,
+            )
+            return result
 
     def _review_render(
         self, render_id: str, decision: str, *, reviewer: str | None, notes: str | None
@@ -967,6 +993,8 @@ class StoryboardService:
             render = self._render_row(connection, render_id)
             if render["state"] != "completed":
                 raise Conflict("only completed renders can be reviewed")
+            if not render["output_path"] or not render["output_sha256"] or not render["duration_seconds"]:
+                raise Conflict("completed render is missing required output provenance")
             review_id = _id()
             now = _now()
             connection.execute(
@@ -1034,7 +1062,7 @@ class StoryboardService:
             assets = [
                 dict(asset)
                 for asset in connection.execute(
-                    "SELECT a.asset_key, a.path, a.sha256, sa.role, sa.sort_order "
+                    "SELECT a.asset_key, a.kind, a.path, a.sha256, sa.role, sa.sort_order "
                     "FROM shot_assets sa JOIN assets a ON a.id = sa.asset_id "
                     "WHERE sa.revision_id = ? AND a.archived_at IS NULL "
                     "ORDER BY sa.role, sa.sort_order",

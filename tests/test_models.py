@@ -113,3 +113,10 @@ def test_asset_paths_must_be_project_relative() -> None:
     for unsafe in ("/tmp/image.png", "../image.png", "assets/../../image.png"):
         with pytest.raises(ValidationError, match="project-relative"):
             AssetSpec(key="unsafe", kind=AssetKind.image, path=unsafe)
+
+
+def test_unknown_interchange_schema_version_is_rejected() -> None:
+    payload = example_project().model_dump(mode="json")
+    payload["schema_version"] = 2
+    with pytest.raises(ValidationError, match="schema_version"):
+        ProjectSpec.model_validate(payload)

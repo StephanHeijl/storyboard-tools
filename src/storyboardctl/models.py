@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 from pathlib import PurePosixPath
-from typing import Any, Self
+from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -140,7 +140,7 @@ class StoryboardSpec(StrictModel):
 
 
 class ProjectSpec(StrictModel):
-    schema_version: int = Field(default=1, ge=1)
+    schema_version: Literal[1] = 1
     slug: str = Field(min_length=1, pattern=r"^[a-z0-9][a-z0-9-]*$")
     title: str = Field(min_length=1)
     storyboard: StoryboardSpec

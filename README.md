@@ -127,6 +127,7 @@ Useful atomic operations:
 ```bash
 storyboardctl render shot v1 20 --seed 123 --plan-only
 storyboardctl render status RENDER_ID
+storyboardctl render reconcile RENDER_ID
 storyboardctl render retry RENDER_ID
 storyboardctl render rerender RENDER_ID --seed 456
 storyboardctl review approve RENDER_ID --reviewer agent-qa --notes 'Identity stable'
@@ -181,7 +182,7 @@ JSON is written to stdout by default. Expected failures write one JSON object to
 | 5 | ComfyUI, ffmpeg, ffprobe, or other external-service failure |
 | 6 | File/path/hash integrity failure |
 
-Use a unique `--idempotency-key` for import retries. Commands never ask questions. For people inspecting state, put `--format table` before the command:
+Use a unique `--idempotency-key` for import or render-planning retries. Commands never ask questions. For people inspecting state, put `--format table` before the command:
 
 ```bash
 storyboardctl --format table storyboard list
@@ -203,4 +204,3 @@ See [Schema and invariants](docs/schema.md) for the relational model and [Contri
 ## License
 
 MIT. See [LICENSE](LICENSE).
-

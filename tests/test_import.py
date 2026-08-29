@@ -94,9 +94,7 @@ def test_import_hashes_assets_that_already_exist(tmp_path) -> None:
     )
     service.import_spec(spec)
     with database.connect() as connection:
-        digest = connection.execute(
-            "SELECT sha256 FROM assets WHERE asset_key = 'frame'"
-        ).fetchone()[0]
+        digest = connection.execute("SELECT sha256 FROM assets WHERE asset_key = 'frame'").fetchone()[0]
     assert digest is not None
     assert service.verify_asset("frame")["sha256"] == digest
 

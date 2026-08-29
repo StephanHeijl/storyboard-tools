@@ -129,7 +129,9 @@ CREATE TABLE renders (
     id TEXT PRIMARY KEY,
     revision_id TEXT NOT NULL REFERENCES shot_revisions(id) ON DELETE RESTRICT,
     attempt_number INTEGER NOT NULL CHECK (attempt_number > 0),
-    state TEXT NOT NULL CHECK (state IN ('planned', 'queued', 'running', 'completed', 'failed', 'cancelled')),
+    state TEXT NOT NULL CHECK (
+        state IN ('planned', 'queued', 'running', 'timed_out', 'completed', 'failed', 'cancelled')
+    ),
     seed INTEGER NOT NULL CHECK (seed >= 0),
     prompt_snapshot TEXT NOT NULL,
     settings_json TEXT NOT NULL,
@@ -140,6 +142,7 @@ CREATE TABLE renders (
     duration_seconds REAL CHECK (duration_seconds IS NULL OR duration_seconds > 0),
     error_message TEXT,
     source_render_id TEXT REFERENCES renders(id) ON DELETE RESTRICT,
+    replay_workflow INTEGER NOT NULL DEFAULT 0 CHECK (replay_workflow IN (0, 1)),
     created_at TEXT NOT NULL,
     queued_at TEXT,
     started_at TEXT,

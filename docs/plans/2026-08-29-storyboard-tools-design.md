@@ -20,7 +20,7 @@ The system has five layers:
 4. `comfy`: a generic ComfyUI HTTP client plus adapter protocol. An included MiniMax H3 adapter is derived from the useful generic concepts in the existing project, but contains no production-specific prompts, paths, names, addresses, or credentials.
 5. `cli`: thin command handlers that parse arguments, call one service operation, serialize a result, and map domain errors to stable exit codes.
 
-SQLite uses foreign keys, WAL mode, a busy timeout, explicit migrations, UTC timestamps, and uniqueness constraints as the final guard against races. Mutating CLI operations accept an optional idempotency key so an agent retry cannot create duplicate shots, jobs, or approvals. Human-facing shot numbers are mutable ordering labels; immutable UUIDs and revision IDs are used for relationships.
+SQLite uses foreign keys, WAL mode, a busy timeout, explicit migrations, UTC timestamps, and uniqueness constraints as the final guard against races. Initial imports and render planning accept an optional idempotency key; other mutations use uniqueness constraints and optimistic storyboard snapshots. Human-facing shot numbers are mutable ordering labels; immutable UUIDs and revision IDs are used for relationships.
 
 ## Storyboard and Shot Versioning
 
@@ -30,7 +30,7 @@ A conceptual shot has a stable UUID. Its content lives in immutable shot revisio
 
 Each storyboard version owns ordered `version_shots` entries. Default labels are `10`, `20`, `30`, and so on. Insertion chooses an available integer between neighbors; if no integer remains, the command returns a conflict and asks for an explicit `storyboard renumber --step 10`. Renumbering changes labels only, never UUIDs, links, renders, or revisions.
 
-Removing a shot archives its version entry rather than deleting the conceptual shot. `--purge` is a separate guarded operation and refuses to delete referenced records. Locked storyboard versions cannot be mutated; they must be cloned first. A version snapshot number increments on every successful mutation and is included in output, allowing agents to use optimistic `--expect-snapshot` checks and avoid overwriting concurrent changes.
+Removing a shot archives its version entry rather than deleting the conceptual shot. Version 0.1 does not expose permanent metadata or media deletion. Locked storyboard versions cannot be mutated; they must be cloned first. A version snapshot number increments on every successful mutation and is included in output, allowing agents to use optimistic `--expect-snapshot` checks and avoid overwriting concurrent changes.
 
 ## Data Model
 
@@ -45,7 +45,7 @@ Core tables are:
 - `assets`: reusable project-relative files with kind, media type, hash, and optional duration.
 - `shot_assets`: ordered roles such as reference image, first frame, last frame, attachment, or source audio.
 - `shot_links`: semantic relationships between stable shots, including continuity, derives-first-frame, and derives-last-frame.
-- `music_cues` and `shot_music`: reusable audio assets with `starts_here`, `continues`, or `associated`, plus optional offset, gain, and fade metadata.
+- `music_cues` and `shot_music`: reusable audio assets with `starts_here`, `continues`, or `associated`; timing/mix columns are reserved for a later audio-finishing release.
 - `renders`: one row per attempt, including revision, monotonic attempt number, state, seed, prompt snapshot, settings, workflow snapshot path, ComfyUI prompt ID, output path/hash, measured duration, and failure details.
 - `render_reviews`: append-only approval/rejection history.
 - `approved_renders`: the single currently selected approved render per shot revision.
@@ -57,7 +57,7 @@ The database stores paths, hashes, and metadata—not media blobs or credentials
 
 `render shot 30` resolves the active storyboard entry, validates all linked files and hashes, asks the configured adapter to construct an API-format ComfyUI workflow, writes that immutable workflow snapshot, records a queued render attempt, submits it, records the returned prompt ID, polls history, downloads the output to a unique project-relative path, probes its media duration, hashes it, and marks the render complete. Each state transition is an individual short database transaction; network calls never hold a database lock.
 
-`render retry RENDER_ID` repeats the exact prompt, workflow settings, and seed. `render rerender RENDER_ID` copies the configuration but selects a fresh random seed unless `--seed` is supplied. Failed or interrupted jobs remain inspectable and can be reconciled by prompt ID. ComfyUI connection details come from environment variables or an ignored local TOML file, never from the production database.
+`render retry RENDER_ID` replays the immutable workflow snapshot with the same seed and a new output identity. `render rerender RENDER_ID` copies the configuration but selects a fresh random seed unless `--seed` is supplied. Timed-out jobs remain inspectable and can be reconciled by prompt ID. ComfyUI connection details come from environment variables, never from the production database.
 
 Reviews are append-only. Approving a completed render selects it as the approved render for that exact shot revision and supersedes any prior selection without deleting history. Rejecting records a reason and unselects that render if necessary. A render for an old revision cannot accidentally satisfy a changed shot. Cloned storyboards share approvals because they share revision IDs.
 
@@ -69,23 +69,22 @@ The ComfyUI client handles image upload, prompt submission, history polling, out
 
 `compile build` creates that manifest and performs full assembly with `ffmpeg`. Video sources are normalized to the requested canvas, frame rate, pixel format, video codec, and audio format before concatenation. Each source is trimmed to the shot's intended duration; shorter renders cause a validation failure rather than silent timeline drift. The release does not mix reusable music cues. Music relationships remain available in the manifest for a later dedicated audio-mixing layer.
 
-Compilation filenames use a monotonic version per storyboard, for example `assembly/v2/cut_003.mp4`, and never overwrite an earlier snapshot. The manifest lives beside the output and provides reproducible provenance. A later build against the same storyboard may select newer approved renders and becomes `cut_004`; old cuts and manifests remain intact until explicitly archived or purged.
+Compilation filenames use a monotonic version per storyboard, for example `assembly/v2/cut_003.mp4`, and never overwrite an earlier snapshot. The manifest lives beside the output and provides reproducible provenance. A later build against the same storyboard may select newer approved renders and becomes `cut_004`; old cuts and manifests remain intact.
 
 ## CLI Surface
 
 The initial command families are:
 
 - `init`, `migrate`, `doctor`
-- `import spec`, `export spec`
-- `storyboard list|show|clone|lock|archive|renumber`
-- `shot list|show|add|revise|move|remove`
-- `asset list|add|verify|link|unlink`
-- `music add|link|unlink`
-- `render shot|retry|rerender|status|wait|list|reconcile`
+- `import spec`
+- `storyboard list|clone|lock|archive|renumber`
+- `shot list|add|revise|move|remove`
+- `asset add|verify|link`
+- `render shot|retry|rerender|status|reconcile`
 - `review approve|reject|history`
-- `compile manifest|build|list`
+- `compile manifest|build`
 
-Every successful command prints one JSON object. Lists contain stable IDs as well as human labels. Errors use a JSON object on stderr with `code`, `message`, and optional `details`; expected validation, conflict, missing-resource, external-service, and system failures have distinct exit statuses. `--format table` provides compact interactive views. Mutations support `--idempotency-key`, and version mutations support `--expect-snapshot`.
+Every successful command prints one JSON object. Lists contain stable IDs as well as human labels. Errors use a JSON object on stderr with `code`, `message`, and optional `details`; expected validation, conflict, missing-resource, external-service, and system failures have distinct exit statuses. `--format table` provides compact interactive views. Imports and render planning support `--idempotency-key`, and version mutations support `--expect-snapshot`.
 
 The Python service API mirrors these operations and returns typed values. The CLI does not duplicate business rules. This keeps calls minimal for agents while ensuring the same validation and atomicity whether the caller uses Python or a subprocess.
 
@@ -93,9 +92,9 @@ The Python service API mirrors these operations and returns typed values. The CL
 
 Inputs are validated before mutation. Paths must be relative, normalized, remain within the project root after resolution, and not traverse symlinks outside it. Existing files are hashed when registered and verified before rendering or compilation. Database constraints enforce valid states and uniqueness; service checks provide clearer errors before those constraints are reached.
 
-No command removes a media file during normal archival. Purge operations require `--purge`, refuse when references exist, and report exactly which metadata was deleted. The tool never deletes arbitrary external paths. Secrets are read at runtime and are redacted from diagnostics. Workflow snapshots are scrubbed through an adapter hook before persistence.
+No command removes a media file or permanently deletes metadata. Secrets are read at runtime and are redacted from diagnostics. Workflow snapshots are scrubbed through an adapter hook before persistence.
 
-Network operations use bounded timeouts and retries. Submission uses idempotency records locally; reconciliation prevents a lost CLI connection from creating an untracked duplicate job. SQLite transactions are short, use `BEGIN IMMEDIATE` for contested writes, and expose optimistic snapshot conflicts rather than silently accepting stale updates.
+Network operations use bounded timeouts. Render planning uses idempotency records locally, and stored ComfyUI prompt IDs allow timed-out jobs to be reconciled without a duplicate submission. SQLite transactions are short, use `BEGIN IMMEDIATE` for contested writes, and expose optimistic snapshot conflicts rather than silently accepting stale updates.
 
 ## Testing and Release Quality
 
