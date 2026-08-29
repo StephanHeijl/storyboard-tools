@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from storyboardctl.database import Database
-from storyboardctl.errors import Conflict, NotFound
+from storyboardctl.errors import Conflict, IntegrityFailure, NotFound
 from storyboardctl.models import AssetKind, AssetRole, ProjectSpec, ShotAssetSpec, ShotSpec
 from storyboardctl.paths import file_sha256, normalize_relative_path, resolve_project_path
 
@@ -97,10 +97,12 @@ class StoryboardService:
                 ),
             )
             for asset in spec.assets:
+                asset_path = resolve_project_path(self.project_root, asset.path)
+                asset_sha256 = file_sha256(asset_path) if asset_path.is_file() else None
                 connection.execute(
                     "INSERT INTO assets(id, production_id, asset_key, kind, path, title, "
-                    "media_type, duration_seconds, metadata_json, created_at) "
-                    "VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "media_type, sha256, duration_seconds, metadata_json, created_at) "
+                    "VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         _id(),
                         asset.key,
@@ -108,6 +110,7 @@ class StoryboardService:
                         asset.path,
                         asset.title,
                         asset.media_type,
+                        asset_sha256,
                         asset.duration_seconds,
                         _json(asset.metadata),
                         created_at,
@@ -606,8 +609,6 @@ class StoryboardService:
             return result
 
     def verify_asset(self, key: str) -> dict[str, Any]:
-        from storyboardctl.errors import IntegrityFailure
-
         with self.database.connect() as connection:
             row = connection.execute(
                 "SELECT id, path, sha256 FROM assets WHERE production_id = 1 AND asset_key = ? AND archived_at IS NULL",
@@ -617,10 +618,20 @@ class StoryboardService:
             raise NotFound(f"asset not found: {key}")
         absolute = resolve_project_path(self.project_root, row["path"], must_exist=True)
         actual = file_sha256(absolute)
-        if row["sha256"] and actual != row["sha256"]:
+        expected = row["sha256"]
+        if expected is None:
+            with self.database.transaction(write=True) as connection:
+                connection.execute(
+                    "UPDATE assets SET sha256 = ? WHERE id = ? AND sha256 IS NULL",
+                    (actual, row["id"]),
+                )
+                expected = connection.execute(
+                    "SELECT sha256 FROM assets WHERE id = ?", (row["id"],)
+                ).fetchone()[0]
+        if actual != expected:
             raise IntegrityFailure(
                 f"asset hash mismatch: {key}",
-                details={"expected": row["sha256"], "actual": actual},
+                details={"expected": expected, "actual": actual},
             )
         return {"asset_id": row["id"], "key": key, "verified": True, "sha256": actual}
 

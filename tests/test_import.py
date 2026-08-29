@@ -5,8 +5,8 @@ import sqlite3
 import pytest
 
 from storyboardctl.database import Database
-from storyboardctl.errors import Conflict
-from storyboardctl.models import ProjectSpec, ShotSpec, StoryboardSpec
+from storyboardctl.errors import Conflict, IntegrityFailure
+from storyboardctl.models import AssetKind, AssetSpec, ProjectSpec, ShotSpec, StoryboardSpec
 from storyboardctl.service import StoryboardService
 
 
@@ -78,3 +78,45 @@ def test_failed_import_leaves_no_partial_production(tmp_path) -> None:
 
     with database.connect() as connection:
         assert connection.execute("SELECT COUNT(*) FROM production").fetchone()[0] == 0
+
+
+def test_import_hashes_assets_that_already_exist(tmp_path) -> None:
+    (tmp_path / "assets").mkdir()
+    (tmp_path / "assets" / "frame.png").write_bytes(b"authoritative-frame")
+    database = Database(tmp_path / "storyboard.db")
+    database.initialize()
+    service = StoryboardService(database, tmp_path)
+    spec = ProjectSpec(
+        slug="hashed",
+        title="Hashed",
+        assets=[AssetSpec(key="frame", kind=AssetKind.image, path="assets/frame.png")],
+        storyboard=StoryboardSpec(name="v1", title="V1", shots=[]),
+    )
+    service.import_spec(spec)
+    with database.connect() as connection:
+        digest = connection.execute(
+            "SELECT sha256 FROM assets WHERE asset_key = 'frame'"
+        ).fetchone()[0]
+    assert digest is not None
+    assert service.verify_asset("frame")["sha256"] == digest
+
+
+def test_first_verification_pins_an_asset_created_after_import(tmp_path) -> None:
+    database = Database(tmp_path / "storyboard.db")
+    database.initialize()
+    service = StoryboardService(database, tmp_path)
+    spec = ProjectSpec(
+        slug="planned",
+        title="Planned",
+        assets=[AssetSpec(key="frame", kind=AssetKind.image, path="assets/frame.png")],
+        storyboard=StoryboardSpec(name="v1", title="V1", shots=[]),
+    )
+    service.import_spec(spec)
+    (tmp_path / "assets").mkdir()
+    (tmp_path / "assets" / "frame.png").write_bytes(b"first-version")
+    pinned = service.verify_asset("frame")
+    assert pinned["verified"] is True
+
+    (tmp_path / "assets" / "frame.png").write_bytes(b"replacement")
+    with pytest.raises(IntegrityFailure, match="hash mismatch"):
+        service.verify_asset("frame")
