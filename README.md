@@ -135,6 +135,27 @@ storyboardctl review reject RENDER_ID --notes 'Continuity jump at final frame'
 storyboardctl review history RENDER_ID
 ```
 
+Agents can submit without holding a process open, then resume by ID:
+
+```bash
+storyboardctl render shot v1 20 --no-wait
+storyboardctl render execute RENDER_ID --no-wait
+storyboardctl render wait RENDER_ID
+storyboardctl render list --version v1 --position 20
+```
+
+If submission fails after planning, the JSON error details include the render ID, attempt number, workflow path, and output path.
+
+Live ComfyUI checks replace raw REST probes:
+
+```bash
+storyboardctl comfy ping
+storyboardctl comfy queue
+storyboardctl comfy preflight
+```
+
+`preflight` checks the H3 nodes and configured model filenames before a render is submitted. Schema-level negative prompts are converted into explicit `AVOID:` instructions in H3's saved workflow because H3 has no separate negative-conditioning input.
+
 `retry` preserves the exact seed and settings. `rerender` keeps the settings and selects a new random seed unless one is supplied. Every attempt gets a monotonic attempt number and UUID fragment; files are never overwritten.
 
 Approving a completed render selects it for that exact shot revision and supersedes the earlier selection without deleting review history. Storyboard clones share that approval while they share the revision. Editing prompt, duration, render settings, assets, frames, or other render-relevant data creates a revision with no approval.
@@ -164,6 +185,33 @@ Or assemble the full cut:
 
 ```bash
 storyboardctl compile build v1 --width 1920 --height 1080 --fps 24
+```
+
+Run reproducible technical QC and review the assembled cut:
+
+```bash
+storyboardctl render qc RENDER_ID
+storyboardctl compile qc COMPILATION_ID
+storyboardctl compile approve COMPILATION_ID --reviewer agent-qa --notes 'Cut accepted'
+storyboardctl compile reject COMPILATION_ID --notes 'Continuity issue at first cut'
+storyboardctl compile history COMPILATION_ID
+```
+
+QC writes JSON reports, contact sheets, cut-boundary sheets, decode results, hashes, black/freeze findings, and audio-level measurements under `review/`, and records each report in SQLite.
+
+For a continuity-aware next shot, promote an approved final frame atomically:
+
+```bash
+storyboardctl shot bridge v1 10 20 --expect-snapshot 4
+```
+
+This extracts shot 10's approved final frame, registers and hashes the image, creates one new revision of shot 20 with a `first_frame` relationship, and switches it to image-to-video.
+
+Production readiness no longer requires direct SQL:
+
+```bash
+storyboardctl production status --version v1
+storyboardctl storyboard audit v1
 ```
 
 Compilation stops before `ffmpeg` if any active shot lacks an approved compatible render, an output hash is stale, or a render is shorter than its intended trim duration. Inputs are normalized before concatenation. Outputs are monotonic snapshots such as `assembly/v1/cut_001.mp4`; later builds produce `cut_002.mp4` rather than replacing history.

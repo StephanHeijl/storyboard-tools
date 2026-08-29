@@ -117,7 +117,11 @@ def test_submit_returns_queued_without_waiting_and_wait_finishes(tmp_path, monke
             storyboard=StoryboardSpec(
                 name="v1",
                 title="V1",
-                shots=[ShotSpec(key="shot", title="Shot", description="Shot", prompt="Shot", duration_seconds=1, adapter="fake")],
+                shots=[
+                    ShotSpec(
+                        key="shot", title="Shot", description="Shot", prompt="Shot", duration_seconds=1, adapter="fake"
+                    )
+                ],
             ),
         )
     )

@@ -92,6 +92,7 @@ class RenderRunner:
             settings = details["settings"]
             context = WorkflowContext(
                 prompt=details["prompt"],
+                negative_prompt=details["negative_prompt"],
                 render_mode=RenderMode(details["render_mode"]),
                 width=int(settings.get("width", 1344)),
                 height=int(settings.get("height", 768)),
@@ -114,11 +115,11 @@ class RenderRunner:
             current = self.service.render_details(render_id)
             if current["state"] == "submitting":
                 self.service.transition_render(render_id, "failed", error_message=str(error))
-            context = self._error_context(current)
+            error_context = self._error_context(current)
             if isinstance(error, StoryboardError):
-                error.details = {**context, **error.details}
+                error.details = {**error_context, **error.details}
                 raise
-            raise ExternalServiceFailure(f"render submission failed: {error}", details=context) from error
+            raise ExternalServiceFailure(f"render submission failed: {error}", details=error_context) from error
 
     def wait(
         self,
@@ -152,11 +153,11 @@ class RenderRunner:
                 next_state = "timed_out" if timed_out and current["comfy_prompt_id"] else "failed"
                 if next_state != current["state"]:
                     self.service.transition_render(render_id, next_state, error_message=str(error))
-            context = self._error_context(current)
+            error_context = self._error_context(current)
             if isinstance(error, StoryboardError):
-                error.details = {**context, **error.details}
+                error.details = {**error_context, **error.details}
                 raise
-            raise ExternalServiceFailure(f"render wait failed: {error}", details=context) from error
+            raise ExternalServiceFailure(f"render wait failed: {error}", details=error_context) from error
 
     def _workflow_for(
         self,

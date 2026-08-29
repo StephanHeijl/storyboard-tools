@@ -1350,7 +1350,7 @@ class StoryboardService:
     def render_details(self, render_id: str) -> dict[str, Any]:
         with self.database.connect() as connection:
             row = connection.execute(
-                "SELECT r.*, sr.prompt, sr.duration_seconds AS intended_duration_seconds, "
+                "SELECT r.*, sr.prompt, sr.negative_prompt, sr.duration_seconds AS intended_duration_seconds, "
                 "sr.render_mode, sr.adapter FROM renders r JOIN shot_revisions sr "
                 "ON sr.id = r.revision_id WHERE r.id = ?",
                 (render_id,),

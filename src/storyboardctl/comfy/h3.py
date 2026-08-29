@@ -131,10 +131,13 @@ class H3Adapter:
                 "class_type": "SaveVideo",
             },
         }
+        effective_prompt = context.prompt
+        if context.negative_prompt:
+            effective_prompt = f"{effective_prompt}\n\nAVOID: {context.negative_prompt}"
         conditioning: dict[str, Any] = {
             "clip": ["2", 0],
             "vae": ["3", 0],
-            "prompt": context.prompt,
+            "prompt": effective_prompt,
             "width": context.width,
             "height": context.height,
             "length": context.frames,

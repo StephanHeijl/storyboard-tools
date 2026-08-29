@@ -56,6 +56,8 @@ production
 - Exactly one render can be selected for a shot revision.
 - A selected render must belong to the selected revision; the service enforces completion before review.
 - Compilation items pin shot, revision, render, hash, order, and trim duration.
+- Quality reports belong to exactly one render or compilation and preserve their generated report path and JSON payload.
+- Exactly one reviewed compilation can be selected per storyboard version.
 - An idempotency key appears at most once in the append-only event log.
 - Archived entries remain available for provenance but are excluded from active listings and compilation.
 
@@ -73,6 +75,14 @@ planned → submitting → queued → running → completed
 Terminal render states cannot transition again. Review decisions do not rewrite render state.
 
 Compilations move through `planned → building → completed`, with `failed` as a terminal error state. Their filenames and database numbers are never reused.
+
+Render and compilation reviews are append-only. Selecting a newer approved item supersedes the selection pointer without deleting review history.
+
+## Continuity bridges and H3 prompts
+
+A continuity bridge extracts the approved source render's final frame into a hashed project-relative image asset. The target shot receives a new immutable revision with a `first_frame` asset relationship and `image_to_video` mode; the previous revision remains intact.
+
+`negative_prompt` remains part of the immutable shot revision. The H3 adapter records it in the submitted workflow by appending an explicit `AVOID:` instruction to the positive prompt, since the installed H3 nodes expose no separate negative-conditioning socket.
 
 ## Paths and secrets
 

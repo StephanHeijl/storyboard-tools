@@ -87,3 +87,23 @@ def test_h3_adapter_declares_preflight_requirements() -> None:
     assert "MiniMaxH3ImageToVideo" in requirements["nodes"]
     assert H3Models().fl2va_model in requirements["models"]
     assert H3Models().video_vae in requirements["models"]
+
+
+def test_h3_adapter_translates_negative_prompt_into_explicit_instructions() -> None:
+    workflow = H3Adapter().build_workflow(
+        WorkflowContext(
+            prompt="One small robot walks through a meadow.",
+            negative_prompt="text, duplicate robot, flicker",
+            render_mode=RenderMode.text_to_video,
+            width=736,
+            height=416,
+            frames=56,
+            steps=8,
+            seed=1,
+            output_key="negative-test",
+        )
+    )
+
+    effective = workflow["5"]["inputs"]["prompt"]
+    assert effective.startswith("One small robot walks through a meadow.")
+    assert "AVOID: text, duplicate robot, flicker" in effective

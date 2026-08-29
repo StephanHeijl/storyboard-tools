@@ -121,7 +121,12 @@ def test_live_diagnostics_report_ping_queue_and_preflight() -> None:
     )
 
     assert client.ping()["comfyui_version"] == "1.2.3"
-    assert client.queue_status() == {"running": 1, "pending": 0, "queue_running": [[1, "job-running"]], "queue_pending": []}
+    assert client.queue_status() == {
+        "running": 1,
+        "pending": 0,
+        "queue_running": [[1, "job-running"]],
+        "queue_pending": [],
+    }
     assert client.preflight(nodes=("UNETLoader", "SaveVideo"), models=("model.safetensors",))["ok"] is True
     missing = client.preflight(nodes=("MissingNode",), models=("missing.safetensors",))
     assert missing["ok"] is False

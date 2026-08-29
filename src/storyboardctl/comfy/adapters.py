@@ -17,6 +17,7 @@ class WorkflowContext:
     steps: int
     seed: int
     output_key: str
+    negative_prompt: str | None = None
     reference_images: tuple[str, ...] = ()
     first_frame: str | None = None
     last_frame: str | None = None
