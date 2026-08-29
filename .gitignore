@@ -1,0 +1,20 @@
+.DS_Store
+.venv/
+.worktrees/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+
+# Production-local state and large generated media
+*.db
+*.db-shm
+*.db-wal
+.storyboardctl.toml
+renders/
+assembly/
+
