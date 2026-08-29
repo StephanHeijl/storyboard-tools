@@ -188,6 +188,11 @@ def storyboard_lock(context: typer.Context, version: str) -> None:
     _execute(context, lambda: _service(context).lock_storyboard(version))
 
 
+@storyboard_app.command("archive")
+def storyboard_archive(context: typer.Context, version: str) -> None:
+    _execute(context, lambda: _service(context).archive_storyboard(version))
+
+
 @storyboard_app.command("renumber")
 def storyboard_renumber(
     context: typer.Context,
@@ -252,6 +257,25 @@ def shot_remove(
     _execute(
         context,
         lambda: _service(context).remove_shot(version, position, expect_snapshot=expect_snapshot),
+    )
+
+
+@shot_app.command("move")
+def shot_move(
+    context: typer.Context,
+    version: str,
+    position: int,
+    new_position: int,
+    expect_snapshot: int | None = typer.Option(None, "--expect-snapshot"),
+) -> None:
+    _execute(
+        context,
+        lambda: _service(context).move_shot(
+            version,
+            position,
+            new_position,
+            expect_snapshot=expect_snapshot,
+        ),
     )
 
 

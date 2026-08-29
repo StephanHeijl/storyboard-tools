@@ -518,6 +518,62 @@ class StoryboardService:
             self._event(connection, "shot.removed", result, entity_type="shot", entity_id=row["shot_id"])
             return result
 
+    def move_shot(
+        self,
+        version_name: str,
+        position: int,
+        new_position: int,
+        *,
+        expect_snapshot: int | None = None,
+    ) -> dict[str, Any]:
+        if new_position <= 0:
+            raise Conflict("shot position must be positive")
+        with self.database.transaction(write=True) as connection:
+            version = self._version(connection, version_name, mutable=True)
+            self._check_snapshot(version, expect_snapshot)
+            row = connection.execute(
+                "SELECT shot_id FROM version_shots WHERE version_id = ? AND position = ? AND archived_at IS NULL",
+                (version["id"], position),
+            ).fetchone()
+            if row is None:
+                raise NotFound(f"active shot not found at position {position}")
+            if new_position == position:
+                return {
+                    "version": version_name,
+                    "position": position,
+                    "new_position": new_position,
+                    "snapshot": int(version["snapshot"]),
+                }
+            if connection.execute(
+                "SELECT 1 FROM version_shots WHERE version_id = ? AND position = ? AND archived_at IS NULL",
+                (version["id"], new_position),
+            ).fetchone():
+                raise Conflict(f"shot position is already in use: {new_position}")
+            now = _now()
+            connection.execute(
+                "UPDATE version_shots SET position = ?, updated_at = ? WHERE version_id = ? AND shot_id = ?",
+                (new_position, now, version["id"], row["shot_id"]),
+            )
+            snapshot = int(version["snapshot"]) + 1
+            connection.execute(
+                "UPDATE storyboard_versions SET snapshot = ?, updated_at = ? WHERE id = ?",
+                (snapshot, now, version["id"]),
+            )
+            result = {
+                "version": version_name,
+                "position": position,
+                "new_position": new_position,
+                "snapshot": snapshot,
+            }
+            self._event(
+                connection,
+                "shot.moved",
+                result,
+                entity_type="shot",
+                entity_id=row["shot_id"],
+            )
+            return result
+
     def renumber_storyboard(
         self,
         version_name: str,
@@ -570,6 +626,21 @@ class StoryboardService:
             )
             result = {"version": version_name, "status": "locked", "snapshot": snapshot}
             self._event(connection, "storyboard.locked", result, entity_id=version["id"])
+            return result
+
+    def archive_storyboard(self, version_name: str) -> dict[str, Any]:
+        with self.database.transaction(write=True) as connection:
+            version = self._version(connection, version_name)
+            if version["status"] == "archived":
+                raise Conflict(f"storyboard {version_name!r} is already archived")
+            snapshot = int(version["snapshot"]) + 1
+            now = _now()
+            connection.execute(
+                "UPDATE storyboard_versions SET status = 'archived', snapshot = ?, updated_at = ? WHERE id = ?",
+                (snapshot, now, version["id"]),
+            )
+            result = {"version": version_name, "status": "archived", "snapshot": snapshot}
+            self._event(connection, "storyboard.archived", result, entity_id=version["id"])
             return result
 
     def add_asset(
@@ -625,9 +696,7 @@ class StoryboardService:
                     "UPDATE assets SET sha256 = ? WHERE id = ? AND sha256 IS NULL",
                     (actual, row["id"]),
                 )
-                expected = connection.execute(
-                    "SELECT sha256 FROM assets WHERE id = ?", (row["id"],)
-                ).fetchone()[0]
+                expected = connection.execute("SELECT sha256 FROM assets WHERE id = ?", (row["id"],)).fetchone()[0]
         if actual != expected:
             raise IntegrityFailure(
                 f"asset hash mismatch: {key}",

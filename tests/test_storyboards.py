@@ -130,3 +130,20 @@ def test_snapshot_conflict_lock_remove_and_renumber(service) -> None:
     service.lock_storyboard("v1")
     with pytest.raises(Conflict, match="locked"):
         service.remove_shot("v1", 10)
+
+
+def test_move_preserves_identity_and_archive_prevents_mutation(service) -> None:
+    before = service.list_shots("v1")[1]
+    moved = service.move_shot("v1", 20, 15, expect_snapshot=0)
+    after = service.list_shots("v1")[1]
+    assert moved["snapshot"] == 1
+    assert after["position"] == 15
+    assert after["shot_id"] == before["shot_id"]
+    assert after["revision_id"] == before["revision_id"]
+    with pytest.raises(Conflict, match="already in use"):
+        service.move_shot("v1", 15, 10)
+
+    archived = service.archive_storyboard("v1")
+    assert archived["status"] == "archived"
+    with pytest.raises(Conflict, match="archived"):
+        service.move_shot("v1", 15, 25)
