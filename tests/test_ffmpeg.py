@@ -5,7 +5,7 @@ import subprocess
 
 import pytest
 
-from storyboardctl.compiler import Compiler, CompilationSettings, probe_duration
+from storyboardctl.compiler import CompilationSettings, Compiler, probe_duration
 from storyboardctl.database import Database
 from storyboardctl.models import ProjectSpec, ShotSpec, StoryboardSpec
 from storyboardctl.service import StoryboardService
@@ -71,9 +71,7 @@ def test_build_assembles_two_approved_clips(tmp_path) -> None:
         service.complete_render(render["render_id"], duration_seconds=probe_duration(output))
         service.approve_render(render["render_id"])
 
-    result = Compiler(database, tmp_path).build(
-        "v1", CompilationSettings(width=320, height=180, fps=24)
-    )
+    result = Compiler(database, tmp_path).build("v1", CompilationSettings(width=320, height=180, fps=24))
     output = tmp_path / result["output_path"]
     assert output.exists()
     assert result["state"] == "completed"

@@ -81,4 +81,3 @@ def test_execution_errors_and_missing_outputs_are_clear() -> None:
 def test_video_discovery_is_recursive() -> None:
     output = {"a": [{"nested": {"filename": "ignore.png"}}, {"filename": "movie.webm"}]}
     assert discover_video_output(output)["filename"] == "movie.webm"
-

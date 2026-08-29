@@ -70,4 +70,3 @@ def test_state_machine_refuses_invalid_transitions(service, tmp_path) -> None:
     assert completed["output_sha256"]
     with pytest.raises(Conflict, match="transition"):
         service.transition_render(render["render_id"], "running")
-

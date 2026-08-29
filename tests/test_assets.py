@@ -58,4 +58,3 @@ def test_linking_an_ordered_asset_creates_a_new_shot_revision(service, tmp_path)
     after = service.list_shots("v1")[0]
     assert result["revision_number"] == 2
     assert after["revision_id"] != before["revision_id"]
-

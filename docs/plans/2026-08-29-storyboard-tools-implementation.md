@@ -271,7 +271,7 @@ python -m ruff check .
 python -m mypy src
 python -m build
 python -m storyboardctl.cli --help
-rg -n -i 'duinrell|192\.168\.|/Users/|api[_-]?key|password' README.md LICENSE CONTRIBUTING.md docs examples src tests pyproject.toml
+rg -n -i '192\.168\.|/Users/|api[_-]?key|password' README.md LICENSE CONTRIBUTING.md docs examples src tests pyproject.toml
 git status --short
 ```
 

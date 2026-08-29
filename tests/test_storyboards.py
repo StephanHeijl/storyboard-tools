@@ -51,17 +51,13 @@ def test_import_numbers_shots_by_ten_and_clone_shares_revisions(service) -> None
     clone = service.clone_storyboard("v1", "short", title="Short Cut")
     copied = service.list_shots("short")
     assert clone["snapshot"] == 0
-    assert [shot["revision_id"] for shot in copied] == [
-        shot["revision_id"] for shot in original
-    ]
+    assert [shot["revision_id"] for shot in copied] == [shot["revision_id"] for shot in original]
 
 
 def test_revising_a_shot_is_immutable_and_only_changes_target_version(service) -> None:
     service.clone_storyboard("v1", "v2")
     before_v1 = service.list_shots("v1")[0]
-    result = service.revise_shot(
-        "v2", 10, {"prompt": "A changed prompt"}, expect_snapshot=0
-    )
+    result = service.revise_shot("v2", 10, {"prompt": "A changed prompt"}, expect_snapshot=0)
     after_v1 = service.list_shots("v1")[0]
     after_v2 = service.list_shots("v2")[0]
 
@@ -134,4 +130,3 @@ def test_snapshot_conflict_lock_remove_and_renumber(service) -> None:
     service.lock_storyboard("v1")
     with pytest.raises(Conflict, match="locked"):
         service.remove_shot("v1", 10)
-

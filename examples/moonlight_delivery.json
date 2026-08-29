@@ -1,0 +1,105 @@
+{
+  "schema_version": 1,
+  "slug": "moonlight-delivery",
+  "title": "Moonlight Delivery",
+  "storyboard": {
+    "name": "v1",
+    "title": "First Delivery",
+    "shots": [
+      {
+        "key": "approach",
+        "position": null,
+        "title": "Approach",
+        "description": "A tiny delivery craft approaches the moon.",
+        "prompt": "Wide view of a tiny delivery craft approaching a quiet moon.",
+        "negative_prompt": null,
+        "duration_seconds": 3.0,
+        "render_mode": "text_to_video",
+        "seed": null,
+        "adapter": "h3",
+        "render_settings": {},
+        "assets": [],
+        "links": [],
+        "music": {"theme": "starts_here"},
+        "notes": []
+      },
+      {
+        "key": "landing",
+        "position": null,
+        "title": "Soft landing",
+        "description": "The courier lands beside a silver mailbox.",
+        "prompt": "A lunar courier lands gently beside a silver mailbox.",
+        "negative_prompt": null,
+        "duration_seconds": 4.0,
+        "render_mode": "image_to_video",
+        "seed": null,
+        "adapter": "h3",
+        "render_settings": {},
+        "assets": [
+          {"asset_key": "moon", "role": "first_frame", "order": 0, "notes": null},
+          {"asset_key": "courier", "role": "reference", "order": 0, "notes": null}
+        ],
+        "links": [
+          {"target_shot_key": "approach", "kind": "continuity", "notes": null}
+        ],
+        "music": {"theme": "continues"},
+        "notes": []
+      },
+      {
+        "key": "delivery",
+        "position": null,
+        "title": "Delivery",
+        "description": "The courier places a glowing parcel in the mailbox.",
+        "prompt": "Close view of the courier placing a glowing parcel in the mailbox.",
+        "negative_prompt": null,
+        "duration_seconds": 3.0,
+        "render_mode": "reference_to_video",
+        "seed": null,
+        "adapter": "h3",
+        "render_settings": {},
+        "assets": [
+          {"asset_key": "courier", "role": "reference", "order": 0, "notes": null}
+        ],
+        "links": [
+          {"target_shot_key": "landing", "kind": "continuity", "notes": null}
+        ],
+        "music": {"theme": "associated"},
+        "notes": []
+      }
+    ],
+    "description": "A three-shot example with references, continuity, and music metadata."
+  },
+  "assets": [
+    {
+      "key": "courier",
+      "kind": "image",
+      "path": "assets/courier.png",
+      "title": null,
+      "media_type": null,
+      "duration_seconds": null,
+      "metadata": {}
+    },
+    {
+      "key": "moon",
+      "kind": "image",
+      "path": "assets/moon.png",
+      "title": null,
+      "media_type": null,
+      "duration_seconds": null,
+      "metadata": {}
+    },
+    {
+      "key": "theme",
+      "kind": "audio",
+      "path": "assets/theme.wav",
+      "title": null,
+      "media_type": null,
+      "duration_seconds": null,
+      "metadata": {}
+    }
+  ],
+  "music": [
+    {"key": "theme", "asset_key": "theme", "title": "Quiet Orbit", "metadata": {}}
+  ],
+  "metadata": {}
+}

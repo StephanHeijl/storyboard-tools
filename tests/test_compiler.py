@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from storyboardctl.compiler import Compiler, CompilationSettings
+from storyboardctl.compiler import CompilationSettings, Compiler
 from storyboardctl.database import Database
 from storyboardctl.errors import Conflict, IntegrityFailure
 from storyboardctl.models import ProjectSpec, ShotSpec, StoryboardSpec
@@ -89,4 +89,3 @@ def test_manifest_rejects_render_shorter_than_intended_shot(tmp_path) -> None:
         connection.execute("UPDATE renders SET duration_seconds = 0.5 WHERE attempt_number = 1")
     with pytest.raises(IntegrityFailure, match="shorter"):
         Compiler(service.database, tmp_path).create_manifest("v1")
-

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 
 from storyboardctl.database import Database
@@ -71,7 +73,7 @@ def test_failed_import_leaves_no_partial_production(tmp_path) -> None:
     )
     # Force a late database conflict that bypasses the validated input model.
     object.__setattr__(spec.storyboard.shots[1], "position", 10)
-    with pytest.raises(Exception):
+    with pytest.raises(sqlite3.IntegrityError):
         service.import_spec(spec)
 
     with database.connect() as connection:

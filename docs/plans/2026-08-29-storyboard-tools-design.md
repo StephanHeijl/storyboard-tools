@@ -6,7 +6,7 @@ Storyboard Tools is an open-source, agent-facing Python toolkit for managing a v
 
 The database is the source of truth for storyboard structure, shot revisions, ordered asset relationships, ComfyUI jobs, render attempts, reviews, and compilation selection. Large media remains in ordinary project-relative files. Every stored file reference includes a SHA-256 digest when the file is available, so accidental replacement can be detected without embedding media in SQLite.
 
-The first release provides a typed Python authoring schema. Humans and language models can compose `ProjectSpec`, `StoryboardSpec`, and `ShotSpec` objects, validate them before touching the database, serialize them to JSON, and import the result transactionally. A tiny fictional example demonstrates the format; no Duinrell data is copied.
+The first release provides a typed Python authoring schema. Humans and language models can compose `ProjectSpec`, `StoryboardSpec`, and `ShotSpec` objects, validate them before touching the database, serialize them to JSON, and import the result transactionally. A tiny fictional example demonstrates the format; no source-production data is copied.
 
 The package and command are named `storyboardctl`. It targets Python 3.11 or newer, uses SQLite directly rather than an ORM, emits JSON on stdout by default, reserves stderr for diagnostics, never prompts unless explicitly asked, and uses stable exit statuses. It ships under the MIT license.
 
@@ -103,4 +103,4 @@ Development follows red-green-refactor. Unit tests cover schema validation, migr
 
 A local fake ComfyUI HTTP server verifies upload, submission, polling, failure, reconciliation, and download without a network dependency. `ffmpeg` integration tests use tiny generated color clips when the executable is available and otherwise skip with an explicit reason. CLI tests invoke the real entry point and assert JSON stdout, JSON stderr, and exit codes.
 
-Release verification includes the full test suite, type checking, linting, package build, installation into an isolated environment, example import, CLI smoke tests, database integrity checks, and a scan ensuring the repository contains no Duinrell strings, private IP addresses, absolute workspace paths, credentials, databases, renders, or generated media.
+Release verification includes the full test suite, type checking, linting, package build, installation into an isolated environment, example import, CLI smoke tests, database integrity checks, and a scan ensuring the repository contains no source-production strings, private IP addresses, absolute workspace paths, credentials, databases, renders, or generated media.
