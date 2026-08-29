@@ -86,6 +86,12 @@ def test_expected_errors_are_json_on_stderr_with_stable_exit_code(tmp_path) -> N
     assert error["code"] == "not_found"
     assert result.stdout == ""
 
+    write_spec(tmp_path)
+    invoke(tmp_path, "import", "spec", "spec.json")
+    malformed = invoke(tmp_path, "shot", "revise", "v1", "10", "--changes", "{broken")
+    assert malformed.exit_code == 2
+    assert json.loads(malformed.stderr)["code"] == "validation_error"
+
 
 def test_table_format_is_available_for_interactive_use(tmp_path) -> None:
     write_spec(tmp_path)

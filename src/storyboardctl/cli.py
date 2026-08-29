@@ -99,7 +99,13 @@ def _execute(context: typer.Context, operation: Callable[[], Any]) -> None:
             err=True,
         )
         raise typer.Exit(ValidationFailure.exit_code) from error
-    except (OSError, json.JSONDecodeError, sqlite3.Error) as error:
+    except json.JSONDecodeError as error:
+        typer.echo(
+            json_text({"code": "validation_error", "message": str(error), "details": {}}),
+            err=True,
+        )
+        raise typer.Exit(ValidationFailure.exit_code) from error
+    except (OSError, sqlite3.Error) as error:
         typer.echo(
             json_text({"code": "system_error", "message": str(error), "details": {}}),
             err=True,
