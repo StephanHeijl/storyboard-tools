@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import secrets
 import sqlite3
 import uuid
 from datetime import UTC, datetime
@@ -10,7 +11,8 @@ from typing import Any
 
 from storyboardctl.database import Database
 from storyboardctl.errors import Conflict, NotFound
-from storyboardctl.models import ProjectSpec, ShotSpec
+from storyboardctl.models import AssetKind, ProjectSpec, ShotAssetSpec, ShotSpec
+from storyboardctl.paths import file_sha256, normalize_relative_path, resolve_project_path
 
 
 def _now() -> str:
@@ -591,3 +593,371 @@ class StoryboardService:
             result = {"version": version_name, "status": "locked", "snapshot": snapshot}
             self._event(connection, "storyboard.locked", result, entity_id=version["id"])
             return result
+
+    def add_asset(
+        self,
+        key: str,
+        kind: AssetKind,
+        path: str,
+        *,
+        title: str | None = None,
+        media_type: str | None = None,
+        duration_seconds: float | None = None,
+    ) -> dict[str, Any]:
+        relative = normalize_relative_path(path)
+        absolute = resolve_project_path(self.project_root, relative, must_exist=True)
+        digest = file_sha256(absolute)
+        with self.database.transaction(write=True) as connection:
+            if connection.execute(
+                "SELECT 1 FROM assets WHERE production_id = 1 AND asset_key = ?", (key,)
+            ).fetchone():
+                raise Conflict(f"asset key already exists: {key}")
+            asset_id = _id()
+            connection.execute(
+                "INSERT INTO assets(id, production_id, asset_key, kind, path, title, media_type, "
+                "sha256, duration_seconds, created_at) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    asset_id,
+                    key,
+                    kind.value,
+                    relative,
+                    title,
+                    media_type,
+                    digest,
+                    duration_seconds,
+                    _now(),
+                ),
+            )
+            result = {"asset_id": asset_id, "key": key, "path": relative, "sha256": digest}
+            self._event(connection, "asset.added", result, entity_type="asset", entity_id=asset_id)
+            return result
+
+    def verify_asset(self, key: str) -> dict[str, Any]:
+        from storyboardctl.errors import IntegrityFailure
+
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT id, path, sha256 FROM assets WHERE production_id = 1 AND asset_key = ? "
+                "AND archived_at IS NULL",
+                (key,),
+            ).fetchone()
+        if row is None:
+            raise NotFound(f"asset not found: {key}")
+        absolute = resolve_project_path(self.project_root, row["path"], must_exist=True)
+        actual = file_sha256(absolute)
+        if row["sha256"] and actual != row["sha256"]:
+            raise IntegrityFailure(
+                f"asset hash mismatch: {key}",
+                details={"expected": row["sha256"], "actual": actual},
+            )
+        return {"asset_id": row["id"], "key": key, "verified": True, "sha256": actual}
+
+    def _active_shot_row(
+        self, connection: sqlite3.Connection, version_id: str, position: int
+    ) -> sqlite3.Row:
+        row = connection.execute(
+            "SELECT s.shot_key, vs.*, sr.* FROM version_shots vs "
+            "JOIN shots s ON s.id = vs.shot_id JOIN shot_revisions sr ON sr.id = vs.revision_id "
+            "WHERE vs.version_id = ? AND vs.position = ? AND vs.archived_at IS NULL",
+            (version_id, position),
+        ).fetchone()
+        if row is None:
+            raise NotFound(f"active shot not found at position {position}")
+        return row
+
+    def link_asset(
+        self,
+        version_name: str,
+        position: int,
+        asset_key: str,
+        *,
+        role: str = "reference",
+        order: int = 0,
+        notes: str | None = None,
+        expect_snapshot: int | None = None,
+    ) -> dict[str, Any]:
+        with self.database.transaction(write=True) as connection:
+            version = self._version(connection, version_name, mutable=True)
+            self._check_snapshot(version, expect_snapshot)
+            if connection.execute(
+                "SELECT 1 FROM assets WHERE production_id = 1 AND asset_key = ? "
+                "AND archived_at IS NULL",
+                (asset_key,),
+            ).fetchone() is None:
+                raise NotFound(f"asset not found: {asset_key}")
+            row = self._active_shot_row(connection, version["id"], position)
+            current = self._shot_spec_from_row(connection, row)
+            payload = current.model_dump(mode="json")
+            payload["assets"].append(
+                ShotAssetSpec(
+                    asset_key=asset_key, role=role, order=order, notes=notes
+                ).model_dump(mode="json")
+            )
+            revised = ShotSpec.model_validate(payload)
+            revision_id, revision_number = self._insert_revision(connection, row["shot_id"], revised)
+            now = _now()
+            snapshot = int(version["snapshot"]) + 1
+            connection.execute(
+                "UPDATE version_shots SET revision_id = ?, updated_at = ? "
+                "WHERE version_id = ? AND shot_id = ?",
+                (revision_id, now, version["id"], row["shot_id"]),
+            )
+            connection.execute(
+                "UPDATE storyboard_versions SET snapshot = ?, updated_at = ? WHERE id = ?",
+                (snapshot, now, version["id"]),
+            )
+            result = {
+                "version": version_name,
+                "position": position,
+                "asset_key": asset_key,
+                "revision_id": revision_id,
+                "revision_number": revision_number,
+                "snapshot": snapshot,
+            }
+            self._event(connection, "asset.linked", result, entity_type="shot", entity_id=row["shot_id"])
+            return result
+
+    def _plan_render_for_revision(
+        self,
+        connection: sqlite3.Connection,
+        revision_id: str,
+        *,
+        path_label: str,
+        position: int,
+        seed: int,
+        settings: dict[str, Any],
+        source_render_id: str | None = None,
+    ) -> dict[str, Any]:
+        revision = connection.execute(
+            "SELECT prompt FROM shot_revisions WHERE id = ?", (revision_id,)
+        ).fetchone()
+        if revision is None:
+            raise NotFound(f"shot revision not found: {revision_id}")
+        attempt = int(
+            connection.execute(
+                "SELECT COALESCE(MAX(attempt_number), 0) + 1 FROM renders WHERE revision_id = ?",
+                (revision_id,),
+            ).fetchone()[0]
+        )
+        render_id = _id()
+        fragment = render_id.split("-")[0]
+        safe_label = "".join(char if char.isalnum() or char in "-_" else "-" for char in path_label)
+        stem = f"shot_{position:04d}_{fragment}_a{attempt:03d}"
+        output_path = f"renders/{safe_label}/{stem}.mp4"
+        workflow_path = f"renders/{safe_label}/{stem}_workflow.json"
+        connection.execute(
+            "INSERT INTO renders(id, revision_id, attempt_number, state, seed, prompt_snapshot, "
+            "settings_json, workflow_path, output_path, source_render_id, created_at) "
+            "VALUES (?, ?, ?, 'planned', ?, ?, ?, ?, ?, ?, ?)",
+            (
+                render_id,
+                revision_id,
+                attempt,
+                seed,
+                revision["prompt"],
+                _json(settings),
+                workflow_path,
+                output_path,
+                source_render_id,
+                _now(),
+            ),
+        )
+        return {
+            "render_id": render_id,
+            "revision_id": revision_id,
+            "attempt_number": attempt,
+            "state": "planned",
+            "seed": seed,
+            "settings": settings,
+            "workflow_path": workflow_path,
+            "output_path": output_path,
+            "source_render_id": source_render_id,
+        }
+
+    def plan_render(
+        self,
+        version_name: str,
+        position: int,
+        *,
+        seed: int | None = None,
+        settings: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        with self.database.transaction(write=True) as connection:
+            version = self._version(connection, version_name)
+            row = self._active_shot_row(connection, version["id"], position)
+            merged_settings = json.loads(row["render_settings_json"])
+            if settings:
+                merged_settings.update(settings)
+            resolved_seed = seed if seed is not None else row["seed"]
+            if resolved_seed is None:
+                resolved_seed = secrets.randbits(63)
+            result = self._plan_render_for_revision(
+                connection,
+                row["revision_id"],
+                path_label=version_name,
+                position=position,
+                seed=int(resolved_seed),
+                settings=merged_settings,
+            )
+            self._event(
+                connection,
+                "render.planned",
+                result,
+                entity_type="render",
+                entity_id=result["render_id"],
+            )
+            return result
+
+    def _render_row(self, connection: sqlite3.Connection, render_id: str) -> sqlite3.Row:
+        row = connection.execute("SELECT * FROM renders WHERE id = ?", (render_id,)).fetchone()
+        if row is None:
+            raise NotFound(f"render not found: {render_id}")
+        return row
+
+    def retry_render(self, render_id: str) -> dict[str, Any]:
+        with self.database.transaction(write=True) as connection:
+            source = self._render_row(connection, render_id)
+            result = self._plan_render_for_revision(
+                connection,
+                source["revision_id"],
+                path_label="retry",
+                position=int(source["attempt_number"]),
+                seed=int(source["seed"]),
+                settings=json.loads(source["settings_json"]),
+                source_render_id=render_id,
+            )
+            self._event(connection, "render.retried", result, entity_type="render", entity_id=result["render_id"])
+            return result
+
+    def rerender(self, render_id: str, *, seed: int | None = None) -> dict[str, Any]:
+        with self.database.transaction(write=True) as connection:
+            source = self._render_row(connection, render_id)
+            result = self._plan_render_for_revision(
+                connection,
+                source["revision_id"],
+                path_label="rerender",
+                position=int(source["attempt_number"]),
+                seed=seed if seed is not None else secrets.randbits(63),
+                settings=json.loads(source["settings_json"]),
+                source_render_id=render_id,
+            )
+            self._event(connection, "render.rerendered", result, entity_type="render", entity_id=result["render_id"])
+            return result
+
+    def transition_render(
+        self,
+        render_id: str,
+        state: str,
+        *,
+        comfy_prompt_id: str | None = None,
+        error_message: str | None = None,
+    ) -> dict[str, Any]:
+        allowed = {
+            "planned": {"queued", "failed", "cancelled"},
+            "queued": {"running", "completed", "failed", "cancelled"},
+            "running": {"completed", "failed", "cancelled"},
+            "completed": set(),
+            "failed": set(),
+            "cancelled": set(),
+        }
+        if state not in allowed:
+            raise Conflict(f"unknown render state: {state}")
+        with self.database.transaction(write=True) as connection:
+            row = self._render_row(connection, render_id)
+            if state not in allowed[str(row["state"])]:
+                raise Conflict(f"invalid render transition: {row['state']} -> {state}")
+            now = _now()
+            fields = ["state = ?", "error_message = ?"]
+            values: list[Any] = [state, error_message]
+            if comfy_prompt_id is not None:
+                fields.append("comfy_prompt_id = ?")
+                values.append(comfy_prompt_id)
+            timestamp_field = {"queued": "queued_at", "running": "started_at", "completed": "completed_at"}.get(state)
+            if timestamp_field:
+                fields.append(f"{timestamp_field} = ?")
+                values.append(now)
+            values.append(render_id)
+            connection.execute(f"UPDATE renders SET {', '.join(fields)} WHERE id = ?", values)
+            result = {"render_id": render_id, "state": state, "comfy_prompt_id": comfy_prompt_id or row["comfy_prompt_id"]}
+            self._event(connection, "render.transitioned", result, entity_type="render", entity_id=render_id)
+            return result
+
+    def complete_render(self, render_id: str, *, duration_seconds: float) -> dict[str, Any]:
+        with self.database.connect() as connection:
+            row = self._render_row(connection, render_id)
+        if row["state"] not in ("queued", "running"):
+            raise Conflict(f"invalid render transition: {row['state']} -> completed")
+        output = resolve_project_path(self.project_root, row["output_path"], must_exist=True)
+        digest = file_sha256(output)
+        result = self.transition_render(render_id, "completed")
+        with self.database.transaction(write=True) as connection:
+            connection.execute(
+                "UPDATE renders SET output_sha256 = ?, duration_seconds = ? WHERE id = ?",
+                (digest, duration_seconds, render_id),
+            )
+        result.update({"output_path": row["output_path"], "output_sha256": digest, "duration_seconds": duration_seconds})
+        return result
+
+    def _review_render(
+        self, render_id: str, decision: str, *, reviewer: str | None, notes: str | None
+    ) -> dict[str, Any]:
+        with self.database.transaction(write=True) as connection:
+            render = self._render_row(connection, render_id)
+            if render["state"] != "completed":
+                raise Conflict("only completed renders can be reviewed")
+            review_id = _id()
+            now = _now()
+            connection.execute(
+                "INSERT INTO render_reviews(id, render_id, decision, reviewer, notes, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (review_id, render_id, decision, reviewer, notes, now),
+            )
+            if decision == "approved":
+                connection.execute(
+                    "INSERT INTO approved_renders(revision_id, render_id, review_id, selected_at) "
+                    "VALUES (?, ?, ?, ?) ON CONFLICT(revision_id) DO UPDATE SET "
+                    "render_id = excluded.render_id, review_id = excluded.review_id, "
+                    "selected_at = excluded.selected_at",
+                    (render["revision_id"], render_id, review_id, now),
+                )
+            else:
+                connection.execute("DELETE FROM approved_renders WHERE render_id = ?", (render_id,))
+            result = {"review_id": review_id, "render_id": render_id, "decision": decision}
+            self._event(connection, f"render.{decision}", result, entity_type="render", entity_id=render_id)
+            return result
+
+    def approve_render(
+        self, render_id: str, *, reviewer: str | None = None, notes: str | None = None
+    ) -> dict[str, Any]:
+        return self._review_render(render_id, "approved", reviewer=reviewer, notes=notes)
+
+    def reject_render(
+        self, render_id: str, *, reviewer: str | None = None, notes: str | None = None
+    ) -> dict[str, Any]:
+        return self._review_render(render_id, "rejected", reviewer=reviewer, notes=notes)
+
+    def approved_render(self, version_name: str, position: int) -> dict[str, Any] | None:
+        with self.database.connect() as connection:
+            version = self._version(connection, version_name)
+            row = self._active_shot_row(connection, version["id"], position)
+            approved = connection.execute(
+                "SELECT r.* FROM approved_renders ar JOIN renders r ON r.id = ar.render_id "
+                "WHERE ar.revision_id = ?",
+                (row["revision_id"],),
+            ).fetchone()
+        if approved is None:
+            return None
+        result = dict(approved)
+        result["render_id"] = result.pop("id")
+        result["settings"] = json.loads(result.pop("settings_json"))
+        return result
+
+    def review_history(self, render_id: str) -> list[dict[str, Any]]:
+        with self.database.connect() as connection:
+            self._render_row(connection, render_id)
+            rows = connection.execute(
+                "SELECT id AS review_id, render_id, decision, reviewer, notes, created_at "
+                "FROM render_reviews WHERE render_id = ? ORDER BY created_at, id",
+                (render_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
