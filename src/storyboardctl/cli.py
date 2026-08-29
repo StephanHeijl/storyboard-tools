@@ -326,6 +326,25 @@ def shot_move(
     )
 
 
+@shot_app.command("bridge")
+def shot_bridge(
+    context: typer.Context,
+    version: str,
+    source_position: int,
+    target_position: int,
+    expect_snapshot: int | None = typer.Option(None, "--expect-snapshot"),
+) -> None:
+    _execute(
+        context,
+        lambda: _service(context).bridge_shots(
+            version,
+            source_position,
+            target_position,
+            expect_snapshot=expect_snapshot,
+        ),
+    )
+
+
 @asset_app.command("add")
 def asset_add(
     context: typer.Context,

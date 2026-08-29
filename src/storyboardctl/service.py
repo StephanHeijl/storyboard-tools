@@ -4,14 +4,24 @@ import hashlib
 import json
 import secrets
 import sqlite3
+import subprocess
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
 from storyboardctl.database import Database
-from storyboardctl.errors import Conflict, IntegrityFailure, NotFound
-from storyboardctl.models import AssetKind, AssetRole, ProjectSpec, ShotAssetSpec, ShotSpec
+from storyboardctl.errors import Conflict, ExternalServiceFailure, IntegrityFailure, NotFound
+from storyboardctl.models import (
+    AssetKind,
+    AssetRole,
+    ProjectSpec,
+    RenderMode,
+    ShotAssetSpec,
+    ShotLinkKind,
+    ShotLinkSpec,
+    ShotSpec,
+)
 from storyboardctl.paths import file_sha256, normalize_relative_path, resolve_project_path
 
 
@@ -896,6 +906,167 @@ class StoryboardService:
             }
             self._event(connection, "asset.linked", result, entity_type="shot", entity_id=row["shot_id"])
             return result
+
+    def bridge_shots(
+        self,
+        version_name: str,
+        source_position: int,
+        target_position: int,
+        *,
+        expect_snapshot: int | None = None,
+    ) -> dict[str, Any]:
+        if source_position == target_position:
+            raise Conflict("continuity bridge requires two different shots")
+        with self.database.connect() as connection:
+            version = self._version(connection, version_name, mutable=True)
+            self._check_snapshot(version, expect_snapshot)
+            source_shot = self._active_shot_row(connection, version["id"], source_position)
+            self._active_shot_row(connection, version["id"], target_position)
+            render = connection.execute(
+                "SELECT r.* FROM approved_renders ar JOIN renders r ON r.id = ar.render_id WHERE ar.revision_id = ?",
+                (source_shot["revision_id"],),
+            ).fetchone()
+        if render is None:
+            raise Conflict(f"source shot {source_position} has no approved render")
+        if not render["output_path"] or not render["output_sha256"]:
+            raise IntegrityFailure("approved source render has incomplete provenance")
+        source = resolve_project_path(self.project_root, render["output_path"], must_exist=True)
+        actual_source_hash = file_sha256(source)
+        if actual_source_hash != render["output_sha256"]:
+            raise IntegrityFailure(
+                "approved source render hash mismatch",
+                details={"expected": render["output_sha256"], "actual": actual_source_hash},
+            )
+        fragment = str(render["id"]).split("-")[0]
+        asset_key = f"bridge-{source_position:04d}-{target_position:04d}-{fragment}"
+        relative_path = f"assets/continuity/{asset_key}.png"
+        destination = resolve_project_path(self.project_root, relative_path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        staged = destination.with_name(f"{destination.stem}.part.png")
+        try:
+            subprocess.run(
+                [
+                    "ffmpeg",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-y",
+                    "-sseof",
+                    "-1",
+                    "-i",
+                    str(source),
+                    "-vf",
+                    "reverse",
+                    "-frames:v",
+                    "1",
+                    str(staged),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except (OSError, subprocess.CalledProcessError) as error:
+            staged.unlink(missing_ok=True)
+            detail = getattr(error, "stderr", "") or str(error)
+            raise ExternalServiceFailure(f"could not extract continuity frame: {detail}") from error
+        if not staged.is_file():
+            raise ExternalServiceFailure("ffmpeg completed without creating a continuity frame")
+        digest = file_sha256(staged)
+        destination_existed = destination.exists()
+        staged.replace(destination)
+        try:
+            with self.database.transaction(write=True) as connection:
+                version = self._version(connection, version_name, mutable=True)
+                self._check_snapshot(version, expect_snapshot)
+                current_source = self._active_shot_row(connection, version["id"], source_position)
+                current_approved = connection.execute(
+                    "SELECT render_id FROM approved_renders WHERE revision_id = ?",
+                    (current_source["revision_id"],),
+                ).fetchone()
+                if current_approved is None or current_approved["render_id"] != render["id"]:
+                    raise Conflict("source shot approval changed while extracting continuity frame")
+                existing_asset = connection.execute(
+                    "SELECT id, sha256 FROM assets WHERE production_id = 1 AND asset_key = ?",
+                    (asset_key,),
+                ).fetchone()
+                if existing_asset is None:
+                    asset_id = _id()
+                    connection.execute(
+                        "INSERT INTO assets(id, production_id, asset_key, kind, path, title, media_type, "
+                        "sha256, metadata_json, created_at) VALUES (?, 1, ?, 'image', ?, ?, 'image/png', ?, ?, ?)",
+                        (
+                            asset_id,
+                            asset_key,
+                            relative_path,
+                            f"Approved final frame from shot {source_position}",
+                            digest,
+                            _json({"source_render_id": render["id"], "source_position": source_position}),
+                            _now(),
+                        ),
+                    )
+                elif existing_asset["sha256"] != digest:
+                    raise IntegrityFailure("existing continuity asset hash does not match extracted frame")
+                target = self._active_shot_row(connection, version["id"], target_position)
+                current = self._shot_spec_from_row(connection, target)
+                payload = current.model_dump(mode="json")
+                payload["render_mode"] = RenderMode.image_to_video.value
+                payload["assets"] = [item for item in payload["assets"] if item["role"] != AssetRole.first_frame.value]
+                payload["assets"].append(
+                    ShotAssetSpec(
+                        asset_key=asset_key,
+                        role=AssetRole.first_frame,
+                        order=0,
+                        notes=f"Approved final frame from shot {source_position}",
+                    ).model_dump(mode="json")
+                )
+                if not any(
+                    item["target_shot_key"] == source_shot["shot_key"]
+                    and item["kind"] == ShotLinkKind.derives_first_frame.value
+                    for item in payload["links"]
+                ):
+                    payload["links"].append(
+                        ShotLinkSpec(
+                            target_shot_key=source_shot["shot_key"],
+                            kind=ShotLinkKind.derives_first_frame,
+                            notes=f"Uses approved final frame from shot {source_position}",
+                        ).model_dump(mode="json")
+                    )
+                revised = ShotSpec.model_validate(payload)
+                revision_id, revision_number = self._insert_revision(connection, target["shot_id"], revised)
+                now = _now()
+                snapshot = int(version["snapshot"]) + 1
+                connection.execute(
+                    "UPDATE version_shots SET revision_id = ?, updated_at = ? WHERE version_id = ? AND shot_id = ?",
+                    (revision_id, now, version["id"], target["shot_id"]),
+                )
+                connection.execute(
+                    "UPDATE storyboard_versions SET snapshot = ?, updated_at = ? WHERE id = ?",
+                    (snapshot, now, version["id"]),
+                )
+                result = {
+                    "version": version_name,
+                    "source_position": source_position,
+                    "target_position": target_position,
+                    "source_render_id": render["id"],
+                    "asset_key": asset_key,
+                    "asset_path": relative_path,
+                    "asset_sha256": digest,
+                    "revision_id": revision_id,
+                    "revision_number": revision_number,
+                    "snapshot": snapshot,
+                }
+                self._event(
+                    connection,
+                    "shot.bridged",
+                    result,
+                    entity_type="shot",
+                    entity_id=target["shot_id"],
+                )
+                return result
+        except Exception:
+            if not destination_existed:
+                destination.unlink(missing_ok=True)
+            raise
 
     def _plan_render_for_revision(
         self,
