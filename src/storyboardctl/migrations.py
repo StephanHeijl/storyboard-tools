@@ -211,5 +211,37 @@ CREATE UNIQUE INDEX events_idempotency
     ON events(production_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
 """
 
+MIGRATION_2 = """
+CREATE TABLE quality_reports (
+    id TEXT PRIMARY KEY,
+    render_id TEXT REFERENCES renders(id) ON DELETE RESTRICT,
+    compilation_id TEXT REFERENCES compilations(id) ON DELETE RESTRICT,
+    report_number INTEGER NOT NULL CHECK (report_number > 0),
+    verdict TEXT NOT NULL CHECK (verdict IN ('pass', 'warning', 'fail')),
+    report_path TEXT NOT NULL UNIQUE,
+    report_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    CHECK ((render_id IS NOT NULL) != (compilation_id IS NOT NULL)),
+    UNIQUE (render_id, report_number),
+    UNIQUE (compilation_id, report_number)
+);
 
-MIGRATIONS: tuple[tuple[int, str], ...] = ((1, MIGRATION_1),)
+CREATE TABLE compilation_reviews (
+    id TEXT PRIMARY KEY,
+    compilation_id TEXT NOT NULL REFERENCES compilations(id) ON DELETE RESTRICT,
+    decision TEXT NOT NULL CHECK (decision IN ('approved', 'rejected')),
+    reviewer TEXT,
+    notes TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE approved_compilations (
+    version_id TEXT PRIMARY KEY REFERENCES storyboard_versions(id) ON DELETE RESTRICT,
+    compilation_id TEXT NOT NULL UNIQUE REFERENCES compilations(id) ON DELETE RESTRICT,
+    review_id TEXT NOT NULL REFERENCES compilation_reviews(id) ON DELETE RESTRICT,
+    selected_at TEXT NOT NULL
+);
+"""
+
+
+MIGRATIONS: tuple[tuple[int, str], ...] = ((1, MIGRATION_1), (2, MIGRATION_2))

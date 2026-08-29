@@ -18,6 +18,7 @@ from storyboardctl.database import Database
 from storyboardctl.errors import StoryboardError, ValidationFailure
 from storyboardctl.models import AssetKind, ProjectSpec, ShotSpec
 from storyboardctl.output import json_text, table_text
+from storyboardctl.quality import QualityInspector
 from storyboardctl.rendering import RenderRunner
 from storyboardctl.service import StoryboardService
 
@@ -508,6 +509,12 @@ def render_list(
     )
 
 
+@render_app.command("qc")
+def render_qc(context: typer.Context, render_id: str) -> None:
+    state = _state(context)
+    _execute(context, lambda: QualityInspector(state.database, state.root).inspect_render(render_id))
+
+
 @render_app.command("reconcile")
 def render_reconcile(
     context: typer.Context,
@@ -587,6 +594,12 @@ def compile_build(
         context,
         lambda: Compiler(state.database, state.root).build(version, _compilation_settings(width, height, fps)),
     )
+
+
+@compile_app.command("qc")
+def compile_qc(context: typer.Context, compilation_id: str) -> None:
+    state = _state(context)
+    _execute(context, lambda: QualityInspector(state.database, state.root).inspect_compilation(compilation_id))
 
 
 def main() -> None:
