@@ -602,6 +602,37 @@ def compile_qc(context: typer.Context, compilation_id: str) -> None:
     _execute(context, lambda: QualityInspector(state.database, state.root).inspect_compilation(compilation_id))
 
 
+@compile_app.command("approve")
+def compile_approve(
+    context: typer.Context,
+    compilation_id: str,
+    reviewer: str | None = typer.Option(None, "--reviewer"),
+    notes: str | None = typer.Option(None, "--notes"),
+) -> None:
+    _execute(
+        context,
+        lambda: _service(context).approve_compilation(compilation_id, reviewer=reviewer, notes=notes),
+    )
+
+
+@compile_app.command("reject")
+def compile_reject(
+    context: typer.Context,
+    compilation_id: str,
+    reviewer: str | None = typer.Option(None, "--reviewer"),
+    notes: str | None = typer.Option(None, "--notes"),
+) -> None:
+    _execute(
+        context,
+        lambda: _service(context).reject_compilation(compilation_id, reviewer=reviewer, notes=notes),
+    )
+
+
+@compile_app.command("history")
+def compile_history(context: typer.Context, compilation_id: str) -> None:
+    _execute(context, lambda: _service(context).compilation_review_history(compilation_id))
+
+
 def main() -> None:
     app()
 

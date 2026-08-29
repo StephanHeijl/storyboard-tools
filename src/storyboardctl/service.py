@@ -1201,3 +1201,113 @@ class StoryboardService:
         result["settings"] = json.loads(result.pop("settings_json"))
         result["assets"] = assets
         return result
+
+    def _review_compilation(
+        self,
+        compilation_id: str,
+        decision: str,
+        *,
+        reviewer: str | None,
+        notes: str | None,
+    ) -> dict[str, Any]:
+        with self.database.transaction(write=True) as connection:
+            compilation = connection.execute(
+                "SELECT * FROM compilations WHERE id = ?",
+                (compilation_id,),
+            ).fetchone()
+            if compilation is None:
+                raise NotFound(f"compilation not found: {compilation_id}")
+            if compilation["state"] != "completed":
+                raise Conflict("only completed compilations can be reviewed")
+            if not compilation["output_path"] or not compilation["output_sha256"]:
+                raise Conflict("completed compilation is missing required output provenance")
+            output = resolve_project_path(self.project_root, compilation["output_path"], must_exist=True)
+            actual = file_sha256(output)
+            if actual != compilation["output_sha256"]:
+                raise IntegrityFailure(
+                    "compilation output hash mismatch",
+                    details={"expected": compilation["output_sha256"], "actual": actual},
+                )
+            review_id = _id()
+            now = _now()
+            connection.execute(
+                "INSERT INTO compilation_reviews(id, compilation_id, decision, reviewer, notes, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (review_id, compilation_id, decision, reviewer, notes, now),
+            )
+            if decision == "approved":
+                connection.execute(
+                    "INSERT INTO approved_compilations(version_id, compilation_id, review_id, selected_at) "
+                    "VALUES (?, ?, ?, ?) ON CONFLICT(version_id) DO UPDATE SET "
+                    "compilation_id = excluded.compilation_id, review_id = excluded.review_id, "
+                    "selected_at = excluded.selected_at",
+                    (compilation["version_id"], compilation_id, review_id, now),
+                )
+            else:
+                connection.execute(
+                    "DELETE FROM approved_compilations WHERE compilation_id = ?",
+                    (compilation_id,),
+                )
+            result = {"review_id": review_id, "compilation_id": compilation_id, "decision": decision}
+            self._event(
+                connection,
+                f"compilation.{decision}",
+                result,
+                entity_type="compilation",
+                entity_id=compilation_id,
+            )
+            return result
+
+    def approve_compilation(
+        self,
+        compilation_id: str,
+        *,
+        reviewer: str | None = None,
+        notes: str | None = None,
+    ) -> dict[str, Any]:
+        return self._review_compilation(
+            compilation_id,
+            "approved",
+            reviewer=reviewer,
+            notes=notes,
+        )
+
+    def reject_compilation(
+        self,
+        compilation_id: str,
+        *,
+        reviewer: str | None = None,
+        notes: str | None = None,
+    ) -> dict[str, Any]:
+        return self._review_compilation(
+            compilation_id,
+            "rejected",
+            reviewer=reviewer,
+            notes=notes,
+        )
+
+    def approved_compilation(self, version_name: str) -> dict[str, Any] | None:
+        with self.database.connect() as connection:
+            version = self._version(connection, version_name)
+            row = connection.execute(
+                "SELECT c.* FROM approved_compilations ac JOIN compilations c "
+                "ON c.id = ac.compilation_id WHERE ac.version_id = ?",
+                (version["id"],),
+            ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["compilation_id"] = result.pop("id")
+        result["settings"] = json.loads(result.pop("settings_json"))
+        return result
+
+    def compilation_review_history(self, compilation_id: str) -> list[dict[str, Any]]:
+        with self.database.connect() as connection:
+            if connection.execute("SELECT 1 FROM compilations WHERE id = ?", (compilation_id,)).fetchone() is None:
+                raise NotFound(f"compilation not found: {compilation_id}")
+            rows = connection.execute(
+                "SELECT id AS review_id, compilation_id, decision, reviewer, notes, created_at "
+                "FROM compilation_reviews WHERE compilation_id = ? ORDER BY created_at, id",
+                (compilation_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
