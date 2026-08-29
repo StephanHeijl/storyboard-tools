@@ -66,7 +66,7 @@ Storyboard versions move from `draft` to `locked` or `archived`. Only drafts can
 Renders move through:
 
 ```text
-planned → queued → running → completed
+planned → submitting → queued → running → completed
    └────────┴────────┴──────→ failed | cancelled
 ```
 
@@ -79,4 +79,3 @@ Compilations move through `planned → building → completed`, with `failed` as
 Stored paths are POSIX-style and project-relative. Resolution checks the real project root after following symlinks. Existing registered media receives a SHA-256 digest; render and compilation outputs are hashed on completion.
 
 The database does not contain ComfyUI URLs, bearer tokens, or large binaries. Runtime configuration uses `STORYBOARDCTL_COMFY_URL` and `STORYBOARDCTL_COMFY_TOKEN`.
-

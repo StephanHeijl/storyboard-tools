@@ -130,7 +130,9 @@ CREATE TABLE renders (
     revision_id TEXT NOT NULL REFERENCES shot_revisions(id) ON DELETE RESTRICT,
     attempt_number INTEGER NOT NULL CHECK (attempt_number > 0),
     state TEXT NOT NULL CHECK (
-        state IN ('planned', 'queued', 'running', 'timed_out', 'completed', 'failed', 'cancelled')
+        state IN (
+            'planned', 'submitting', 'queued', 'running', 'timed_out', 'completed', 'failed', 'cancelled'
+        )
     ),
     seed INTEGER NOT NULL CHECK (seed >= 0),
     prompt_snapshot TEXT NOT NULL,

@@ -7,7 +7,7 @@ import pytest
 
 from storyboardctl.comfy.adapters import WorkflowContext
 from storyboardctl.database import Database
-from storyboardctl.errors import ExternalServiceFailure
+from storyboardctl.errors import Conflict, ExternalServiceFailure
 from storyboardctl.models import AssetKind, ProjectSpec, RenderMode, ShotSpec, StoryboardSpec
 from storyboardctl.rendering import RenderRunner
 from storyboardctl.service import StoryboardService
@@ -29,6 +29,12 @@ class FakeAdapter:
         }
 
     def scrub_workflow(self, workflow: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        return workflow
+
+    def prepare_replay(
+        self, workflow: dict[str, dict[str, Any]], context: WorkflowContext
+    ) -> dict[str, dict[str, Any]]:
+        workflow["1"]["inputs"]["seed"] = context.seed
         return workflow
 
 
@@ -138,3 +144,75 @@ def test_timed_out_render_can_be_reconciled_without_new_submission(tmp_path, mon
     result = runner.reconcile(planned["render_id"], poll_seconds=0)
     assert result["state"] == "completed"
     assert result["comfy_prompt_id"] == "prompt-1"
+
+
+def test_execute_atomically_claims_a_planned_render(tmp_path) -> None:
+    database = Database(tmp_path / "storyboard.db")
+    database.initialize()
+    service = StoryboardService(database, tmp_path)
+    service.import_spec(
+        ProjectSpec(
+            slug="claim",
+            title="Claim",
+            storyboard=StoryboardSpec(
+                name="v1",
+                title="V1",
+                shots=[
+                    ShotSpec(
+                        key="shot",
+                        title="Shot",
+                        description="Shot",
+                        prompt="Shot",
+                        duration_seconds=1,
+                        adapter="fake",
+                    )
+                ],
+            ),
+        )
+    )
+    planned = service.plan_render("v1", 10)
+    service.transition_render(planned["render_id"], "submitting")
+    comfy = FakeComfy()
+    with pytest.raises(Conflict, match="planned"):
+        RenderRunner(service, comfy, {"fake": FakeAdapter()}).execute(planned["render_id"])
+    assert comfy.workflow is None
+
+
+def test_reconcile_marks_non_timeout_failure_failed(tmp_path) -> None:
+    database = Database(tmp_path / "storyboard.db")
+    database.initialize()
+    service = StoryboardService(database, tmp_path)
+    service.import_spec(
+        ProjectSpec(
+            slug="failed-reconcile",
+            title="Failed reconcile",
+            storyboard=StoryboardSpec(
+                name="v1",
+                title="V1",
+                shots=[
+                    ShotSpec(
+                        key="shot",
+                        title="Shot",
+                        description="Shot",
+                        prompt="Shot",
+                        duration_seconds=1,
+                        adapter="fake",
+                    )
+                ],
+            ),
+        )
+    )
+    planned = service.plan_render("v1", 10)
+    service.transition_render(planned["render_id"], "queued", comfy_prompt_id="prompt-1")
+    service.transition_render(planned["render_id"], "running")
+    comfy = FakeComfy()
+    comfy.wait_for_completion = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        ExternalServiceFailure("ComfyUI execution failed")
+    )
+
+    with pytest.raises(ExternalServiceFailure, match="execution failed"):
+        RenderRunner(service, comfy, {"fake": FakeAdapter()}).reconcile(planned["render_id"])
+
+    details = service.render_details(planned["render_id"])
+    assert details["state"] == "failed"
+    assert details["error_message"] == "ComfyUI execution failed"

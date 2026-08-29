@@ -54,6 +54,10 @@ class RenderRunner:
         except KeyError as error:
             raise NotFound(f"workflow adapter not found: {details['adapter']}") from error
 
+        # This transactional transition is the submission lease. If another worker
+        # already claimed the render, it fails before either worker contacts ComfyUI.
+        self.service.transition_render(render_id, "submitting")
+
         references: list[str] = []
         first_frame: str | None = None
         last_frame: str | None = None
@@ -107,7 +111,7 @@ class RenderRunner:
             return self.service.complete_render(render_id, duration_seconds=duration)
         except Exception as error:
             current = self.service.render_details(render_id)
-            if current["state"] in ("planned", "queued", "running"):
+            if current["state"] in ("submitting", "queued", "running"):
                 next_state = (
                     "timed_out"
                     if isinstance(error, ExternalServiceFailure)
@@ -133,13 +137,7 @@ class RenderRunner:
                 dict[str, dict[str, Any]],
                 json.loads(source_path.read_text(encoding="utf-8")),
             )
-            if "7" in workflow and "noise_seed" in workflow["7"].get("inputs", {}):
-                workflow["7"]["inputs"]["noise_seed"] = context.seed
-            if "15" in workflow and "filename_prefix" in workflow["15"].get("inputs", {}):
-                prior = str(workflow["15"]["inputs"]["filename_prefix"])
-                prefix = prior.rsplit("/", 1)[0] if "/" in prior else "video/storyboardctl"
-                workflow["15"]["inputs"]["filename_prefix"] = f"{prefix}/{context.output_key}"
-            return workflow
+            return adapter.prepare_replay(workflow, context)
         return adapter.build_workflow(context)
 
     def reconcile(
@@ -165,8 +163,10 @@ class RenderRunner:
             self.comfy.download(history, output_path)
             return self.service.complete_render(render_id, duration_seconds=probe_duration(output_path))
         except Exception as error:
-            if isinstance(error, ExternalServiceFailure) and "timed out" in str(error).lower():
-                current = self.service.render_details(render_id)
-                if current["state"] == "running":
-                    self.service.transition_render(render_id, "timed_out", error_message=str(error))
+            current = self.service.render_details(render_id)
+            timed_out = isinstance(error, ExternalServiceFailure) and "timed out" in str(error).lower()
+            if current["state"] in ("queued", "running", "timed_out"):
+                next_state = "timed_out" if timed_out and current["comfy_prompt_id"] else "failed"
+                if next_state != current["state"]:
+                    self.service.transition_render(render_id, next_state, error_message=str(error))
             raise

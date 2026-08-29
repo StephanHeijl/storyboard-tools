@@ -27,6 +27,10 @@ class WorkflowAdapter(Protocol):
 
     def build_workflow(self, context: WorkflowContext) -> dict[str, dict[str, Any]]: ...
 
+    def prepare_replay(
+        self, workflow: dict[str, dict[str, Any]], context: WorkflowContext
+    ) -> dict[str, dict[str, Any]]: ...
+
     def scrub_workflow(self, workflow: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]: ...
 
 

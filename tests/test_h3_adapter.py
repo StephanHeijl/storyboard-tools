@@ -50,3 +50,33 @@ def test_h3_image_workflow_connects_first_and_last_frames() -> None:
     assert workflow["5"]["class_type"] == "MiniMaxH3ImageToVideo"
     assert workflow["5"]["inputs"]["first_frame"] == ["20", 0]
     assert workflow["5"]["inputs"]["last_frame"] == ["21", 0]
+
+
+def test_h3_adapter_prepares_replay_with_new_runtime_values() -> None:
+    adapter = H3Adapter(H3Models(output_prefix="video/example"))
+    original_context = WorkflowContext(
+        prompt="Original prompt",
+        render_mode=RenderMode.image_to_video,
+        width=1344,
+        height=768,
+        frames=107,
+        steps=8,
+        seed=9,
+        output_key="shot_0010_take_001",
+    )
+    workflow = adapter.build_workflow(original_context)
+    replay_context = WorkflowContext(
+        prompt="Original prompt",
+        render_mode=RenderMode.image_to_video,
+        width=1344,
+        height=768,
+        frames=107,
+        steps=8,
+        seed=10,
+        output_key="shot_0010_retry_002",
+    )
+
+    replay = adapter.prepare_replay(workflow, replay_context)
+
+    assert replay["7"]["inputs"]["noise_seed"] == 10
+    assert replay["15"]["inputs"]["filename_prefix"] == "video/example/shot_0010_retry_002"

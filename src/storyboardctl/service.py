@@ -918,7 +918,8 @@ class StoryboardService:
         error_message: str | None = None,
     ) -> dict[str, Any]:
         allowed = {
-            "planned": {"queued", "failed", "cancelled"},
+            "planned": {"submitting", "queued", "failed", "cancelled"},
+            "submitting": {"queued", "failed", "cancelled"},
             "queued": {"running", "completed", "failed", "cancelled"},
             "running": {"timed_out", "completed", "failed", "cancelled"},
             "timed_out": {"running", "completed", "failed", "cancelled"},

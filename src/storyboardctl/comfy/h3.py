@@ -28,6 +28,18 @@ class H3Adapter:
     def scrub_workflow(self, workflow: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
         return workflow
 
+    def prepare_replay(
+        self, workflow: dict[str, dict[str, Any]], context: WorkflowContext
+    ) -> dict[str, dict[str, Any]]:
+        try:
+            workflow["7"]["inputs"]["noise_seed"] = context.seed
+            prior = str(workflow["15"]["inputs"]["filename_prefix"])
+        except KeyError as error:
+            raise Conflict("saved H3 workflow lacks required replay nodes") from error
+        prefix = prior.rsplit("/", 1)[0] if "/" in prior else self.models.output_prefix
+        workflow["15"]["inputs"]["filename_prefix"] = f"{prefix}/{context.output_key}"
+        return workflow
+
     def build_workflow(self, context: WorkflowContext) -> dict[str, dict[str, Any]]:
         if context.render_mode is RenderMode.custom:
             raise Conflict("the H3 adapter cannot build a custom render mode")
