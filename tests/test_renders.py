@@ -78,3 +78,14 @@ def test_state_machine_refuses_invalid_transitions(service, tmp_path) -> None:
     assert completed["output_sha256"]
     with pytest.raises(Conflict, match="transition"):
         service.transition_render(render["render_id"], "running")
+
+
+def test_render_finalization_claim_is_atomic_and_releasable(service) -> None:
+    render = service.plan_render("v1", 10)
+    service.transition_render(render["render_id"], "queued", comfy_prompt_id="prompt-1")
+    service.transition_render(render["render_id"], "running")
+
+    assert service.claim_render_finalization(render["render_id"], "worker-1") is True
+    assert service.claim_render_finalization(render["render_id"], "worker-2") is False
+    service.release_render_finalization(render["render_id"], "worker-1")
+    assert service.claim_render_finalization(render["render_id"], "worker-2") is True

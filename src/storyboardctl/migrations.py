@@ -243,5 +243,23 @@ CREATE TABLE approved_compilations (
 );
 """
 
+MIGRATION_3 = """
+ALTER TABLE renders ADD COLUMN version_id TEXT REFERENCES storyboard_versions(id) ON DELETE RESTRICT;
+ALTER TABLE renders ADD COLUMN position_snapshot INTEGER CHECK (position_snapshot IS NULL OR position_snapshot > 0);
 
-MIGRATIONS: tuple[tuple[int, str], ...] = ((1, MIGRATION_1), (2, MIGRATION_2))
+UPDATE renders SET version_id = (
+    SELECT MIN(vs.version_id) FROM version_shots vs WHERE vs.revision_id = renders.revision_id
+) WHERE version_id IS NULL;
+UPDATE renders SET position_snapshot = (
+    SELECT MIN(vs.position) FROM version_shots vs WHERE vs.revision_id = renders.revision_id
+) WHERE position_snapshot IS NULL;
+
+CREATE TABLE render_finalization_claims (
+    render_id TEXT PRIMARY KEY REFERENCES renders(id) ON DELETE CASCADE,
+    worker_id TEXT NOT NULL,
+    claimed_at TEXT NOT NULL
+);
+"""
+
+
+MIGRATIONS: tuple[tuple[int, str], ...] = ((1, MIGRATION_1), (2, MIGRATION_2), (3, MIGRATION_3))

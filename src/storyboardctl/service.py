@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import secrets
 import sqlite3
 import subprocess
@@ -336,13 +337,13 @@ class StoryboardService:
         position: int | None = None,
         state: str | None = None,
     ) -> list[dict[str, Any]]:
-        conditions = ["vs.archived_at IS NULL"]
+        conditions = ["1 = 1"]
         values: list[Any] = []
         if version_name is not None:
             conditions.append("sv.name = ?")
             values.append(version_name)
         if position is not None:
-            conditions.append("vs.position = ?")
+            conditions.append("r.position_snapshot = ?")
             values.append(position)
         if state is not None:
             conditions.append("r.state = ?")
@@ -351,22 +352,87 @@ class StoryboardService:
             if version_name is not None:
                 self._version(connection, version_name)
             rows = connection.execute(
-                "SELECT r.id AS render_id, sv.name AS version, vs.position, s.shot_key, "
+                "SELECT r.id AS render_id, sv.name AS version, r.position_snapshot AS position, s.shot_key, "
                 "r.revision_id, r.attempt_number, r.state, r.seed, r.comfy_prompt_id, "
                 "r.output_path, r.duration_seconds, r.error_message, r.created_at, "
-                "CASE WHEN ar.render_id = r.id THEN 1 ELSE 0 END AS approved "
-                "FROM renders r JOIN version_shots vs ON vs.revision_id = r.revision_id "
-                "JOIN storyboard_versions sv ON sv.id = vs.version_id "
-                "JOIN shots s ON s.id = vs.shot_id "
+                "CASE WHEN ar.render_id = r.id THEN 1 ELSE 0 END AS approved, "
+                "CASE WHEN EXISTS (SELECT 1 FROM version_shots selected "
+                " WHERE selected.version_id = r.version_id AND selected.revision_id = r.revision_id "
+                " AND selected.archived_at IS NULL) THEN 1 ELSE 0 END AS revision_selected "
+                "FROM renders r JOIN shot_revisions sr ON sr.id = r.revision_id "
+                "JOIN shots s ON s.id = sr.shot_id "
+                "LEFT JOIN storyboard_versions sv ON sv.id = r.version_id "
                 "LEFT JOIN approved_renders ar ON ar.render_id = r.id "
                 f"WHERE {' AND '.join(conditions)} "
-                "ORDER BY sv.name, vs.position, r.attempt_number",
+                "ORDER BY sv.name, r.position_snapshot, r.attempt_number",
+                values,
+            ).fetchall()
+        result = [dict(row) for row in rows]
+        for item in result:
+            item["approved"] = bool(item["approved"])
+            item["revision_selected"] = bool(item["revision_selected"])
+        return result
+
+    def list_compilations(
+        self,
+        *,
+        version_name: str | None = None,
+        state: str | None = None,
+    ) -> list[dict[str, Any]]:
+        conditions = ["1 = 1"]
+        values: list[Any] = []
+        if version_name is not None:
+            conditions.append("sv.name = ?")
+            values.append(version_name)
+        if state is not None:
+            conditions.append("c.state = ?")
+            values.append(state)
+        with self.database.connect() as connection:
+            if version_name is not None:
+                self._version(connection, version_name)
+            rows = connection.execute(
+                "SELECT c.id AS compilation_id, sv.name AS version, c.compilation_number, "
+                "c.storyboard_snapshot, c.state, c.manifest_path, c.output_path, c.output_sha256, "
+                "c.error_message, c.created_at, c.completed_at, "
+                "CASE WHEN ac.compilation_id = c.id THEN 1 ELSE 0 END AS approved, "
+                "(SELECT qr.verdict FROM quality_reports qr WHERE qr.compilation_id = c.id "
+                " ORDER BY qr.report_number DESC LIMIT 1) AS latest_qc_verdict, "
+                "(SELECT qr.id FROM quality_reports qr WHERE qr.compilation_id = c.id "
+                " ORDER BY qr.report_number DESC LIMIT 1) AS latest_quality_report_id "
+                "FROM compilations c JOIN storyboard_versions sv ON sv.id = c.version_id "
+                "LEFT JOIN approved_compilations ac ON ac.compilation_id = c.id "
+                f"WHERE {' AND '.join(conditions)} ORDER BY sv.name, c.compilation_number",
                 values,
             ).fetchall()
         result = [dict(row) for row in rows]
         for item in result:
             item["approved"] = bool(item["approved"])
         return result
+
+    def list_quality_reports(
+        self,
+        *,
+        render_id: str | None = None,
+        compilation_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if render_id is not None and compilation_id is not None:
+            raise Conflict("filter quality reports by render or compilation, not both")
+        conditions = ["1 = 1"]
+        values: list[Any] = []
+        if render_id is not None:
+            conditions.append("render_id = ?")
+            values.append(render_id)
+        if compilation_id is not None:
+            conditions.append("compilation_id = ?")
+            values.append(compilation_id)
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                "SELECT id AS quality_report_id, render_id, compilation_id, report_number, verdict, "
+                "report_path, created_at FROM quality_reports "
+                f"WHERE {' AND '.join(conditions)} ORDER BY created_at, id",
+                values,
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def production_status(self, *, version_name: str | None = None) -> dict[str, Any]:
         with self.database.connect() as connection:
@@ -410,6 +476,19 @@ class StoryboardService:
                         (version["id"],),
                     ).fetchone()[0]
                 )
+                audit = self.audit_storyboard(str(version["name"]))
+                latest_compilation = connection.execute(
+                    "SELECT c.id AS compilation_id, c.compilation_number, c.state, c.output_path, "
+                    "CASE WHEN ac.compilation_id = c.id THEN 1 ELSE 0 END AS approved, "
+                    "(SELECT qr.verdict FROM quality_reports qr WHERE qr.compilation_id = c.id "
+                    " ORDER BY qr.report_number DESC LIMIT 1) AS latest_qc_verdict "
+                    "FROM compilations c LEFT JOIN approved_compilations ac ON ac.compilation_id = c.id "
+                    "WHERE c.version_id = ? ORDER BY c.compilation_number DESC LIMIT 1",
+                    (version["id"],),
+                ).fetchone()
+                latest = dict(latest_compilation) if latest_compilation is not None else None
+                if latest is not None:
+                    latest["approved"] = bool(latest["approved"])
                 summaries.append(
                     {
                         "version": version["name"],
@@ -420,7 +499,9 @@ class StoryboardService:
                         "unapproved_shots": shots - approved,
                         "render_states": states,
                         "compilations": compilations,
-                        "ready_to_compile": shots > 0 and shots == approved,
+                        "ready_to_compile": audit["ready_to_compile"],
+                        "issues": audit["issues"],
+                        "latest_compilation": latest,
                     }
                 )
         return {"production": dict(production), "versions": summaries}
@@ -429,24 +510,41 @@ class StoryboardService:
         with self.database.connect() as connection:
             version = self._version(connection, version_name)
             rows = connection.execute(
-                "SELECT vs.position, s.shot_key, ar.render_id, "
+                "SELECT vs.position, s.shot_key, sr.duration_seconds AS intended_duration, ar.render_id, "
+                "r.state AS approved_state, r.output_path, r.output_sha256, r.duration_seconds, "
                 "(SELECT r.state FROM renders r WHERE r.revision_id = vs.revision_id "
                 " ORDER BY r.attempt_number DESC LIMIT 1) AS latest_render_state "
                 "FROM version_shots vs JOIN shots s ON s.id = vs.shot_id "
+                "JOIN shot_revisions sr ON sr.id = vs.revision_id "
                 "LEFT JOIN approved_renders ar ON ar.revision_id = vs.revision_id "
+                "LEFT JOIN renders r ON r.id = ar.render_id "
                 "WHERE vs.version_id = ? AND vs.archived_at IS NULL ORDER BY vs.position",
                 (version["id"],),
             ).fetchall()
-        issues = [
-            {
-                "code": "missing_approved_render",
-                "position": int(row["position"]),
-                "shot_key": row["shot_key"],
-                "latest_render_state": row["latest_render_state"],
-            }
-            for row in rows
-            if row["render_id"] is None
-        ]
+        issues: list[dict[str, Any]] = []
+        for row in rows:
+            base = {"position": int(row["position"]), "shot_key": row["shot_key"]}
+            if row["render_id"] is None:
+                issues.append(
+                    {"code": "missing_approved_render", **base, "latest_render_state": row["latest_render_state"]}
+                )
+                continue
+            if row["approved_state"] != "completed":
+                issues.append({"code": "approved_render_not_completed", **base, "state": row["approved_state"]})
+                continue
+            if not row["output_path"] or not row["output_sha256"] or not row["duration_seconds"]:
+                issues.append({"code": "approved_output_incomplete", **base})
+                continue
+            output = resolve_project_path(self.project_root, row["output_path"])
+            if not output.is_file():
+                issues.append({"code": "approved_output_missing", **base, "output_path": row["output_path"]})
+                continue
+            actual = file_sha256(output)
+            if actual != row["output_sha256"]:
+                issues.append({"code": "approved_output_hash_mismatch", **base, "output_path": row["output_path"]})
+                continue
+            if float(row["duration_seconds"]) + 0.001 < float(row["intended_duration"]):
+                issues.append({"code": "approved_output_too_short", **base})
         return {
             "version": version_name,
             "snapshot": int(version["snapshot"]),
@@ -942,7 +1040,7 @@ class StoryboardService:
         relative_path = f"assets/continuity/{asset_key}.png"
         destination = resolve_project_path(self.project_root, relative_path)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        staged = destination.with_name(f"{destination.stem}.part.png")
+        staged = destination.with_name(f".{destination.stem}.{uuid.uuid4().hex}.part.png")
         try:
             subprocess.run(
                 [
@@ -972,8 +1070,22 @@ class StoryboardService:
         if not staged.is_file():
             raise ExternalServiceFailure("ffmpeg completed without creating a continuity frame")
         digest = file_sha256(staged)
-        destination_existed = destination.exists()
-        staged.replace(destination)
+        installed_destination = False
+        if destination.exists():
+            if file_sha256(destination) != digest:
+                staged.unlink(missing_ok=True)
+                raise IntegrityFailure("existing continuity destination has different content")
+            staged.unlink(missing_ok=True)
+        else:
+            try:
+                os.link(staged, destination)
+                installed_destination = True
+            except FileExistsError as error:
+                if file_sha256(destination) != digest:
+                    staged.unlink(missing_ok=True)
+                    raise IntegrityFailure("existing continuity destination has different content") from error
+            finally:
+                staged.unlink(missing_ok=True)
         try:
             with self.database.transaction(write=True) as connection:
                 version = self._version(connection, version_name, mutable=True)
@@ -1064,8 +1176,14 @@ class StoryboardService:
                 )
                 return result
         except Exception:
-            if not destination_existed:
-                destination.unlink(missing_ok=True)
+            if installed_destination:
+                with self.database.connect() as connection:
+                    referenced = connection.execute(
+                        "SELECT 1 FROM assets WHERE production_id = 1 AND path = ?",
+                        (relative_path,),
+                    ).fetchone()
+                if referenced is None and destination.is_file() and file_sha256(destination) == digest:
+                    destination.unlink(missing_ok=True)
             raise
 
     def _plan_render_for_revision(
@@ -1079,6 +1197,7 @@ class StoryboardService:
         settings: dict[str, Any],
         source_render_id: str | None = None,
         replay_workflow: bool = False,
+        version_id: str | None = None,
     ) -> dict[str, Any]:
         revision = connection.execute("SELECT prompt FROM shot_revisions WHERE id = ?", (revision_id,)).fetchone()
         if revision is None:
@@ -1097,8 +1216,8 @@ class StoryboardService:
         workflow_path = f"renders/{safe_label}/{stem}_workflow.json"
         connection.execute(
             "INSERT INTO renders(id, revision_id, attempt_number, state, seed, prompt_snapshot, "
-            "settings_json, workflow_path, output_path, source_render_id, replay_workflow, created_at) "
-            "VALUES (?, ?, ?, 'planned', ?, ?, ?, ?, ?, ?, ?, ?)",
+            "settings_json, workflow_path, output_path, source_render_id, replay_workflow, created_at, "
+            "version_id, position_snapshot) VALUES (?, ?, ?, 'planned', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 render_id,
                 revision_id,
@@ -1111,6 +1230,8 @@ class StoryboardService:
                 source_render_id,
                 int(replay_workflow),
                 _now(),
+                version_id,
+                position,
             ),
         )
         return {
@@ -1158,6 +1279,7 @@ class StoryboardService:
                 position=position,
                 seed=int(resolved_seed),
                 settings=merged_settings,
+                version_id=version["id"],
             )
             self._event(
                 connection,
@@ -1182,11 +1304,12 @@ class StoryboardService:
                 connection,
                 source["revision_id"],
                 path_label="retry",
-                position=int(source["attempt_number"]),
+                position=int(source["position_snapshot"] or source["attempt_number"]),
                 seed=int(source["seed"]),
                 settings=json.loads(source["settings_json"]),
                 source_render_id=render_id,
                 replay_workflow=True,
+                version_id=source["version_id"],
             )
             self._event(connection, "render.retried", result, entity_type="render", entity_id=result["render_id"])
             return result
@@ -1198,10 +1321,11 @@ class StoryboardService:
                 connection,
                 source["revision_id"],
                 path_label="rerender",
-                position=int(source["attempt_number"]),
+                position=int(source["position_snapshot"] or source["attempt_number"]),
                 seed=seed if seed is not None else secrets.randbits(63),
                 settings=json.loads(source["settings_json"]),
                 source_render_id=render_id,
+                version_id=source["version_id"],
             )
             self._event(connection, "render.rerendered", result, entity_type="render", entity_id=result["render_id"])
             return result
@@ -1249,6 +1373,29 @@ class StoryboardService:
             }
             self._event(connection, "render.transitioned", result, entity_type="render", entity_id=render_id)
             return result
+
+    def claim_render_finalization(self, render_id: str, worker_id: str) -> bool:
+        with self.database.transaction(write=True) as connection:
+            render = self._render_row(connection, render_id)
+            if render["state"] == "completed":
+                return False
+            if render["state"] not in ("queued", "running", "timed_out"):
+                raise Conflict(f"render cannot be finalized from state: {render['state']}")
+            try:
+                connection.execute(
+                    "INSERT INTO render_finalization_claims(render_id, worker_id, claimed_at) VALUES (?, ?, ?)",
+                    (render_id, worker_id, _now()),
+                )
+            except sqlite3.IntegrityError:
+                return False
+            return True
+
+    def release_render_finalization(self, render_id: str, worker_id: str) -> None:
+        with self.database.transaction(write=True) as connection:
+            connection.execute(
+                "DELETE FROM render_finalization_claims WHERE render_id = ? AND worker_id = ?",
+                (render_id, worker_id),
+            )
 
     def complete_render(self, render_id: str, *, duration_seconds: float) -> dict[str, Any]:
         with self.database.connect() as connection:

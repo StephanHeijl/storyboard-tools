@@ -195,9 +195,13 @@ storyboardctl compile qc COMPILATION_ID
 storyboardctl compile approve COMPILATION_ID --reviewer agent-qa --notes 'Cut accepted'
 storyboardctl compile reject COMPILATION_ID --notes 'Continuity issue at first cut'
 storyboardctl compile history COMPILATION_ID
+storyboardctl compile list --version v1
+storyboardctl compile selected v1
+storyboardctl qc list --render-id RENDER_ID
+storyboardctl qc list --compilation-id COMPILATION_ID
 ```
 
-QC writes JSON reports, contact sheets, cut-boundary sheets, decode results, hashes, black/freeze findings, and audio-level measurements under `review/`, and records each report in SQLite.
+QC writes JSON reports, contact sheets, cut-boundary sheets, decode results, hashes, black/freeze findings, and audio-level measurements under `review/`, and records successful and failed attempts in SQLite. Discovery commands return the latest report with each render or compilation, while `qc list` returns its full history.
 
 For a continuity-aware next shot, promote an approved final frame atomically:
 
@@ -213,6 +217,8 @@ Production readiness no longer requires direct SQL:
 storyboardctl production status --version v1
 storyboardctl storyboard audit v1
 ```
+
+Readiness checks the selected render's state, immutable revision provenance, on-disk hash, and duration. `production status` also identifies the latest compilation, while `compile selected` returns the explicitly approved cut for downstream delivery.
 
 Compilation stops before `ffmpeg` if any active shot lacks an approved compatible render, an output hash is stale, or a render is shorter than its intended trim duration. Inputs are normalized before concatenation. Outputs are monotonic snapshots such as `assembly/v1/cut_001.mp4`; later builds produce `cut_002.mp4` rather than replacing history.
 

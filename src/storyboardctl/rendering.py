@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import math
+import time
+import uuid
 from pathlib import Path
 from typing import Any, Protocol, cast
 
@@ -129,14 +131,34 @@ class RenderRunner:
         poll_seconds: float = 3,
     ) -> dict[str, Any]:
         details = self.service.render_details(render_id)
+        if details["state"] == "completed":
+            return details
         if details["state"] not in ("queued", "running", "timed_out"):
             raise Conflict(f"render cannot be waited for from state: {details['state']}")
         prompt_id = details.get("comfy_prompt_id")
         if not prompt_id:
             raise Conflict("render has no ComfyUI prompt ID to wait for")
-        if details["state"] in ("queued", "timed_out"):
-            self.service.transition_render(render_id, "running")
+        worker_id = str(uuid.uuid4())
+        if not self.service.claim_render_finalization(render_id, worker_id):
+            deadline = time.monotonic() + timeout_seconds
+            while time.monotonic() <= deadline:
+                current = self.service.render_details(render_id)
+                if current["state"] == "completed":
+                    return current
+                if current["state"] in ("failed", "cancelled"):
+                    raise ExternalServiceFailure(
+                        f"render finalization ended in state {current['state']}",
+                        details=self._error_context(current),
+                    )
+                time.sleep(poll_seconds if poll_seconds > 0 else 0.05)
+            raise ExternalServiceFailure(
+                f"timed out waiting for another worker to finalize render {render_id}",
+                details=self._error_context(self.service.render_details(render_id)),
+            )
         try:
+            current_state = self.service.render_details(render_id)["state"]
+            if current_state in ("queued", "timed_out"):
+                self.service.transition_render(render_id, "running")
             history = self.comfy.wait_for_completion(
                 prompt_id,
                 timeout_seconds=timeout_seconds,
@@ -158,6 +180,8 @@ class RenderRunner:
                 error.details = {**error_context, **error.details}
                 raise
             raise ExternalServiceFailure(f"render wait failed: {error}", details=error_context) from error
+        finally:
+            self.service.release_render_finalization(render_id, worker_id)
 
     def _workflow_for(
         self,

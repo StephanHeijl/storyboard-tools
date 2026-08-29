@@ -37,6 +37,7 @@ review_app = typer.Typer(help="Review completed render attempts.")
 compile_app = typer.Typer(help="Create manifests and assemble approved renders.")
 production_app = typer.Typer(help="Inspect production-wide state and readiness.")
 comfy_app = typer.Typer(help="Inspect the configured ComfyUI service.")
+qc_app = typer.Typer(help="Discover persisted media quality reports.")
 app.add_typer(import_app, name="import")
 app.add_typer(storyboard_app, name="storyboard")
 app.add_typer(shot_app, name="shot")
@@ -46,6 +47,7 @@ app.add_typer(review_app, name="review")
 app.add_typer(compile_app, name="compile")
 app.add_typer(production_app, name="production")
 app.add_typer(comfy_app, name="comfy")
+app.add_typer(qc_app, name="qc")
 
 
 @dataclass(frozen=True)
@@ -600,6 +602,20 @@ def compile_manifest(
     )
 
 
+@compile_app.command("list")
+def compile_list(
+    context: typer.Context,
+    version: str | None = typer.Option(None, "--version"),
+    state: str | None = typer.Option(None, "--state"),
+) -> None:
+    _execute(context, lambda: _service(context).list_compilations(version_name=version, state=state))
+
+
+@compile_app.command("selected")
+def compile_selected(context: typer.Context, version: str) -> None:
+    _execute(context, lambda: _service(context).approved_compilation(version))
+
+
 @compile_app.command("build")
 def compile_build(
     context: typer.Context,
@@ -650,6 +666,18 @@ def compile_reject(
 @compile_app.command("history")
 def compile_history(context: typer.Context, compilation_id: str) -> None:
     _execute(context, lambda: _service(context).compilation_review_history(compilation_id))
+
+
+@qc_app.command("list")
+def qc_list(
+    context: typer.Context,
+    render_id: str | None = typer.Option(None, "--render-id"),
+    compilation_id: str | None = typer.Option(None, "--compilation-id"),
+) -> None:
+    _execute(
+        context,
+        lambda: _service(context).list_quality_reports(render_id=render_id, compilation_id=compilation_id),
+    )
 
 
 def main() -> None:

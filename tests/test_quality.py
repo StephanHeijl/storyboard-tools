@@ -8,6 +8,7 @@ import pytest
 
 from storyboardctl.compiler import CompilationSettings, Compiler, probe_duration
 from storyboardctl.database import Database
+from storyboardctl.errors import ExternalServiceFailure
 from storyboardctl.models import ProjectSpec, ShotSpec, StoryboardSpec
 from storyboardctl.quality import QualityInspector
 from storyboardctl.service import StoryboardService
@@ -106,3 +107,48 @@ def test_compilation_qc_generates_boundary_frames(tmp_path) -> None:
     assert report["decode_ok"] is True
     assert len(report["boundary_sheet_paths"]) == 1
     assert (tmp_path / report["boundary_sheet_paths"][0]).is_file()
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg is not installed")
+def test_qc_failure_is_persisted_as_failed_report(tmp_path, monkeypatch) -> None:
+    database, renders, _compilation = prepared_media(tmp_path)
+    inspector = QualityInspector(database, tmp_path)
+    monkeypatch.setattr(
+        inspector,
+        "_contact_sheet",
+        lambda *_args: (_ for _ in ()).throw(ExternalServiceFailure("contact sheet failed")),
+    )
+
+    report = inspector.inspect_render(renders[0]["render_id"])
+
+    assert report["verdict"] == "fail"
+    assert report["decode_ok"] is False
+    assert report["error"]["message"] == "contact sheet failed"
+    assert (tmp_path / report["report_path"]).is_file()
+    with database.connect() as connection:
+        row = connection.execute(
+            "SELECT verdict FROM quality_reports WHERE render_id = ?",
+            (renders[0]["render_id"],),
+        ).fetchone()
+    assert row["verdict"] == "fail"
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg is not installed")
+def test_compilation_and_qc_reports_are_discoverable(tmp_path) -> None:
+    database, renders, compilation = prepared_media(tmp_path)
+    inspector = QualityInspector(database, tmp_path)
+    render_qc = inspector.inspect_render(renders[0]["render_id"])
+    compilation_qc = inspector.inspect_compilation(compilation["compilation_id"])
+    service = StoryboardService(database, tmp_path)
+
+    compilations = service.list_compilations(version_name="v1")
+    reports = service.list_quality_reports(compilation_id=compilation["compilation_id"])
+
+    assert compilations[0]["compilation_id"] == compilation["compilation_id"]
+    assert compilations[0]["latest_qc_verdict"] == compilation_qc["verdict"]
+    assert compilations[0]["approved"] is False
+    assert reports[0]["quality_report_id"] == compilation_qc["quality_report_id"]
+    assert (
+        service.list_quality_reports(render_id=renders[0]["render_id"])[0]["quality_report_id"]
+        == render_qc["quality_report_id"]
+    )

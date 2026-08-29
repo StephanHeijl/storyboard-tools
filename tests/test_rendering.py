@@ -256,3 +256,50 @@ def test_reconcile_marks_non_timeout_failure_failed(tmp_path) -> None:
     details = service.render_details(planned["render_id"])
     assert details["state"] == "failed"
     assert details["error_message"] == "ComfyUI execution failed"
+
+
+def test_wait_observes_another_workers_success_without_contacting_comfy(tmp_path, monkeypatch) -> None:
+    database = Database(tmp_path / "storyboard.db")
+    database.initialize()
+    service = StoryboardService(database, tmp_path)
+    service.import_spec(
+        ProjectSpec(
+            slug="shared-wait",
+            title="Shared wait",
+            storyboard=StoryboardSpec(
+                name="v1",
+                title="V1",
+                shots=[
+                    ShotSpec(
+                        key="shot",
+                        title="Shot",
+                        description="Shot",
+                        prompt="Shot",
+                        duration_seconds=1,
+                        adapter="fake",
+                    )
+                ],
+            ),
+        )
+    )
+    planned = service.plan_render("v1", 10)
+    service.transition_render(planned["render_id"], "queued", comfy_prompt_id="prompt-1")
+    service.transition_render(planned["render_id"], "running")
+    assert service.claim_render_finalization(planned["render_id"], "worker-1") is True
+
+    def finish_during_poll(_seconds: float) -> None:
+        output = tmp_path / planned["output_path"]
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"completed-by-worker-1")
+        service.complete_render(planned["render_id"], duration_seconds=1.1)
+        service.release_render_finalization(planned["render_id"], "worker-1")
+
+    monkeypatch.setattr("storyboardctl.rendering.time.sleep", finish_during_poll)
+    comfy = FakeComfy()
+
+    result = RenderRunner(service, comfy, {"fake": FakeAdapter()}).wait(
+        planned["render_id"], timeout_seconds=1, poll_seconds=0
+    )
+
+    assert result["state"] == "completed"
+    assert comfy.wait_calls == 0

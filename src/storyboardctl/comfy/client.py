@@ -179,7 +179,7 @@ class ComfyClient:
     def download(self, history_entry: dict[str, Any], destination: Path) -> Path:
         item = discover_video_output(history_entry.get("outputs", {}))
         destination.parent.mkdir(parents=True, exist_ok=True)
-        staged = destination.with_suffix(destination.suffix + ".part")
+        staged = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.part")
         url = f"{self.settings.base_url.rstrip('/')}/view"
         try:
             with self.http.stream(

@@ -7,6 +7,7 @@ import pytest
 
 from storyboardctl.compiler import probe_duration
 from storyboardctl.database import Database
+from storyboardctl.errors import IntegrityFailure
 from storyboardctl.models import ProjectSpec, ShotSpec, StoryboardSpec
 from storyboardctl.service import StoryboardService
 
@@ -76,3 +77,59 @@ def test_bridge_promotes_approved_last_frame_into_one_target_revision(tmp_path) 
             "sort_order": 0,
         }
     ]
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg is not installed")
+def test_bridge_never_overwrites_an_existing_destination(tmp_path) -> None:
+    database = Database(tmp_path / "storyboard.db")
+    database.initialize()
+    service = StoryboardService(database, tmp_path)
+    service.import_spec(
+        ProjectSpec(
+            slug="bridge-safe",
+            title="Bridge Safe",
+            storyboard=StoryboardSpec(
+                name="v1",
+                title="V1",
+                shots=[
+                    ShotSpec(key="one", title="One", description="One", prompt="One", duration_seconds=0.3),
+                    ShotSpec(key="two", title="Two", description="Two", prompt="Two", duration_seconds=0.3),
+                ],
+            ),
+        )
+    )
+    render = service.plan_render("v1", 10, seed=1)
+    output = tmp_path / render["output_path"]
+    output.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=green:s=320x180:d=0.6:r=24",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(output),
+        ],
+        check=True,
+    )
+    service.transition_render(render["render_id"], "queued")
+    service.transition_render(render["render_id"], "running")
+    service.complete_render(render["render_id"], duration_seconds=probe_duration(output))
+    service.approve_render(render["render_id"])
+    fragment = render["render_id"].split("-")[0]
+    destination = tmp_path / f"assets/continuity/bridge-0010-0020-{fragment}.png"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(b"pre-existing")
+
+    with pytest.raises(IntegrityFailure, match="existing continuity"):
+        service.bridge_shots("v1", 10, 20)
+
+    assert destination.read_bytes() == b"pre-existing"
