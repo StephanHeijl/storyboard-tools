@@ -80,3 +80,10 @@ def test_h3_adapter_prepares_replay_with_new_runtime_values() -> None:
 
     assert replay["7"]["inputs"]["noise_seed"] == 10
     assert replay["15"]["inputs"]["filename_prefix"] == "video/example/shot_0010_retry_002"
+
+
+def test_h3_adapter_declares_preflight_requirements() -> None:
+    requirements = H3Adapter().requirements()
+    assert "MiniMaxH3ImageToVideo" in requirements["nodes"]
+    assert H3Models().fl2va_model in requirements["models"]
+    assert H3Models().video_vae in requirements["models"]

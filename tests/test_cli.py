@@ -119,3 +119,40 @@ def test_status_audit_and_render_list_commands_emit_json(tmp_path) -> None:
     assert json.loads(renders.stdout)[0]["position"] == 10
     assert json.loads(status.stdout)["versions"][0]["shots"] == 1
     assert json.loads(audit.stdout)["issues"][0]["code"] == "missing_approved_render"
+
+
+def test_comfy_diagnostic_commands_and_async_render_execution(tmp_path, monkeypatch) -> None:
+    write_spec(tmp_path)
+    invoke(tmp_path, "init")
+    invoke(tmp_path, "import", "spec", "spec.json")
+    planned = json.loads(invoke(tmp_path, "render", "shot", "v1", "10", "--plan-only").stdout)
+
+    monkeypatch.setattr("storyboardctl.cli.ComfyClient.ping", lambda _self: {"ok": True, "comfyui_version": "test"})
+    monkeypatch.setattr(
+        "storyboardctl.cli.ComfyClient.queue_status",
+        lambda _self: {"running": 0, "pending": 0, "queue_running": [], "queue_pending": []},
+    )
+    monkeypatch.setattr(
+        "storyboardctl.cli.ComfyClient.preflight",
+        lambda _self, **_kwargs: {"ok": True, "missing_nodes": [], "missing_models": []},
+    )
+
+    class FakeRunner:
+        def submit(self, render_id: str):
+            return {"render_id": render_id, "state": "queued"}
+
+        def execute(self, render_id: str, **_kwargs):
+            return {"render_id": render_id, "state": "completed"}
+
+        def wait(self, render_id: str, **_kwargs):
+            return {"render_id": render_id, "state": "completed"}
+
+    monkeypatch.setattr("storyboardctl.cli._render_runner", lambda _service: FakeRunner())
+
+    assert json.loads(invoke(tmp_path, "comfy", "ping").stdout)["ok"] is True
+    assert json.loads(invoke(tmp_path, "comfy", "queue").stdout)["running"] == 0
+    assert json.loads(invoke(tmp_path, "comfy", "preflight").stdout)["ok"] is True
+    submitted = invoke(tmp_path, "render", "execute", planned["render_id"], "--no-wait")
+    assert json.loads(submitted.stdout)["state"] == "queued"
+    waited = invoke(tmp_path, "render", "wait", planned["render_id"])
+    assert json.loads(waited.stdout)["state"] == "completed"

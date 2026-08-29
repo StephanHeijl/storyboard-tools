@@ -97,3 +97,33 @@ def test_download_streams_to_a_staged_file(tmp_path) -> None:
     client.download({"outputs": {"x": {"filename": "result.mp4"}}}, target)
     assert target.read_bytes() == b"large-video"
     assert not target.with_suffix(".mp4.part").exists()
+
+
+def test_live_diagnostics_report_ping_queue_and_preflight() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/system_stats":
+            return httpx.Response(200, json={"system": {"comfyui_version": "1.2.3"}, "devices": [{"name": "gpu"}]})
+        if request.url.path == "/queue":
+            return httpx.Response(200, json={"queue_running": [[1, "job-running"]], "queue_pending": []})
+        if request.url.path == "/object_info":
+            return httpx.Response(
+                200,
+                json={
+                    "UNETLoader": {"input": {"required": {"unet_name": [["model.safetensors"]]}}},
+                    "SaveVideo": {"input": {"required": {}}},
+                },
+            )
+        raise AssertionError(request.url)
+
+    client = ComfyClient(
+        ComfySettings(base_url="http://comfy.test"),
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    assert client.ping()["comfyui_version"] == "1.2.3"
+    assert client.queue_status() == {"running": 1, "pending": 0, "queue_running": [[1, "job-running"]], "queue_pending": []}
+    assert client.preflight(nodes=("UNETLoader", "SaveVideo"), models=("model.safetensors",))["ok"] is True
+    missing = client.preflight(nodes=("MissingNode",), models=("missing.safetensors",))
+    assert missing["ok"] is False
+    assert missing["missing_nodes"] == ["MissingNode"]
+    assert missing["missing_models"] == ["missing.safetensors"]

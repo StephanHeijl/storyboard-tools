@@ -42,6 +42,7 @@ class FakeComfy:
     def __init__(self) -> None:
         self.workflow: dict[str, dict[str, Any]] | None = None
         self.uploaded_names: list[str] = []
+        self.wait_calls = 0
 
     def upload_image(self, image_path: Path, *, remote_name: str | None = None) -> str:
         self.uploaded_names.append(remote_name or image_path.name)
@@ -52,6 +53,7 @@ class FakeComfy:
         return "prompt-1"
 
     def wait_for_completion(self, prompt_id: str, **_: Any) -> dict[str, Any]:
+        self.wait_calls += 1
         return {"outputs": {"1": {"filename": "result.mp4"}}}
 
     def download(self, history_entry: dict[str, Any], destination: Path) -> Path:
@@ -104,6 +106,36 @@ def test_runner_uploads_assets_snapshots_workflow_and_completes(tmp_path, monkey
     assert (tmp_path / planned["output_path"]).read_bytes() == b"completed-video"
 
 
+def test_submit_returns_queued_without_waiting_and_wait_finishes(tmp_path, monkeypatch) -> None:
+    database = Database(tmp_path / "storyboard.db")
+    database.initialize()
+    service = StoryboardService(database, tmp_path)
+    service.import_spec(
+        ProjectSpec(
+            slug="async",
+            title="Async",
+            storyboard=StoryboardSpec(
+                name="v1",
+                title="V1",
+                shots=[ShotSpec(key="shot", title="Shot", description="Shot", prompt="Shot", duration_seconds=1, adapter="fake")],
+            ),
+        )
+    )
+    planned = service.plan_render("v1", 10, seed=1)
+    comfy = FakeComfy()
+    runner = RenderRunner(service, comfy, {"fake": FakeAdapter()})
+
+    submitted = runner.submit(planned["render_id"])
+
+    assert submitted["state"] == "queued"
+    assert submitted["comfy_prompt_id"] == "prompt-1"
+    assert comfy.wait_calls == 0
+    monkeypatch.setattr("storyboardctl.rendering.probe_duration", lambda _path: 1.1)
+    completed = runner.wait(planned["render_id"], poll_seconds=0)
+    assert completed["state"] == "completed"
+    assert comfy.wait_calls == 1
+
+
 def test_timed_out_render_can_be_reconciled_without_new_submission(tmp_path, monkeypatch) -> None:
     database = Database(tmp_path / "storyboard.db")
     database.initialize()
@@ -135,8 +167,12 @@ def test_timed_out_render_can_be_reconciled_without_new_submission(tmp_path, mon
         ExternalServiceFailure("timed out waiting for ComfyUI prompt prompt-1")
     )
     runner = RenderRunner(service, comfy, {"fake": FakeAdapter()})
-    with pytest.raises(ExternalServiceFailure, match="timed out"):
+    with pytest.raises(ExternalServiceFailure, match="timed out") as captured:
         runner.execute(planned["render_id"], poll_seconds=0)
+    assert captured.value.details["render_id"] == planned["render_id"]
+    assert captured.value.details["attempt_number"] == 1
+    assert captured.value.details["workflow_path"] == planned["workflow_path"]
+    assert captured.value.details["output_path"] == planned["output_path"]
     assert service.render_details(planned["render_id"])["state"] == "timed_out"
 
     comfy.wait_for_completion = original_wait

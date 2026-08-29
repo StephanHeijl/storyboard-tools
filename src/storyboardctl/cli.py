@@ -35,6 +35,7 @@ render_app = typer.Typer(help="Plan and execute ComfyUI renders.")
 review_app = typer.Typer(help="Review completed render attempts.")
 compile_app = typer.Typer(help="Create manifests and assemble approved renders.")
 production_app = typer.Typer(help="Inspect production-wide state and readiness.")
+comfy_app = typer.Typer(help="Inspect the configured ComfyUI service.")
 app.add_typer(import_app, name="import")
 app.add_typer(storyboard_app, name="storyboard")
 app.add_typer(shot_app, name="shot")
@@ -43,6 +44,7 @@ app.add_typer(render_app, name="render")
 app.add_typer(review_app, name="review")
 app.add_typer(compile_app, name="compile")
 app.add_typer(production_app, name="production")
+app.add_typer(comfy_app, name="comfy")
 
 
 @dataclass(frozen=True)
@@ -158,6 +160,29 @@ def doctor(context: typer.Context) -> None:
             "ffprobe": shutil.which("ffprobe"),
             "comfy_url_configured": bool(ComfySettings.from_environment().base_url),
         }
+
+    _execute(context, operation)
+
+
+def _comfy_client() -> ComfyClient:
+    return ComfyClient(ComfySettings.from_environment())
+
+
+@comfy_app.command("ping")
+def comfy_ping(context: typer.Context) -> None:
+    _execute(context, lambda: _comfy_client().ping())
+
+
+@comfy_app.command("queue")
+def comfy_queue(context: typer.Context) -> None:
+    _execute(context, lambda: _comfy_client().queue_status())
+
+
+@comfy_app.command("preflight")
+def comfy_preflight(context: typer.Context) -> None:
+    def operation() -> dict[str, Any]:
+        requirements = H3Adapter().requirements()
+        return _comfy_client().preflight(nodes=requirements["nodes"], models=requirements["models"])
 
     _execute(context, operation)
 
@@ -335,7 +360,7 @@ def _render_runner(service: StoryboardService) -> RenderRunner:
     adapter = H3Adapter()
     return RenderRunner(
         service,
-        ComfyClient(ComfySettings.from_environment()),
+        _comfy_client(),
         {adapter.name: adapter},
     )
 
@@ -347,10 +372,14 @@ def _execute_or_return_plan(
     plan_only: bool,
     timeout_seconds: float,
     poll_seconds: float,
+    no_wait: bool = False,
 ) -> dict[str, Any]:
     if plan_only or planned.get("state") != "planned":
         return planned
-    return _render_runner(service).execute(
+    runner = _render_runner(service)
+    if no_wait:
+        return runner.submit(planned["render_id"])
+    return runner.execute(
         planned["render_id"],
         timeout_seconds=timeout_seconds,
         poll_seconds=poll_seconds,
@@ -368,6 +397,7 @@ def render_shot(
     timeout_seconds: float = typer.Option(1800, "--timeout"),
     poll_seconds: float = typer.Option(3, "--poll-seconds"),
     idempotency_key: str | None = typer.Option(None, "--idempotency-key"),
+    no_wait: bool = typer.Option(False, "--no-wait"),
 ) -> None:
     def operation() -> dict[str, Any]:
         service = _service(context)
@@ -387,6 +417,7 @@ def render_shot(
             plan_only=plan_only,
             timeout_seconds=timeout_seconds,
             poll_seconds=poll_seconds,
+            no_wait=no_wait,
         )
 
     _execute(context, operation)
@@ -397,11 +428,14 @@ def render_retry(
     context: typer.Context,
     render_id: str,
     plan_only: bool = typer.Option(False, "--plan-only"),
+    no_wait: bool = typer.Option(False, "--no-wait"),
 ) -> None:
     def operation() -> dict[str, Any]:
         service = _service(context)
         planned = service.retry_render(render_id)
-        return _execute_or_return_plan(service, planned, plan_only=plan_only, timeout_seconds=1800, poll_seconds=3)
+        return _execute_or_return_plan(
+            service, planned, plan_only=plan_only, timeout_seconds=1800, poll_seconds=3, no_wait=no_wait
+        )
 
     _execute(context, operation)
 
@@ -412,11 +446,14 @@ def render_rerender(
     render_id: str,
     seed: int | None = typer.Option(None, "--seed"),
     plan_only: bool = typer.Option(False, "--plan-only"),
+    no_wait: bool = typer.Option(False, "--no-wait"),
 ) -> None:
     def operation() -> dict[str, Any]:
         service = _service(context)
         planned = service.rerender(render_id, seed=seed)
-        return _execute_or_return_plan(service, planned, plan_only=plan_only, timeout_seconds=1800, poll_seconds=3)
+        return _execute_or_return_plan(
+            service, planned, plan_only=plan_only, timeout_seconds=1800, poll_seconds=3, no_wait=no_wait
+        )
 
     _execute(context, operation)
 
@@ -424,6 +461,38 @@ def render_rerender(
 @render_app.command("status")
 def render_status(context: typer.Context, render_id: str) -> None:
     _execute(context, lambda: _service(context).render_details(render_id))
+
+
+@render_app.command("execute")
+def render_execute(
+    context: typer.Context,
+    render_id: str,
+    no_wait: bool = typer.Option(False, "--no-wait"),
+    timeout_seconds: float = typer.Option(1800, "--timeout"),
+    poll_seconds: float = typer.Option(3, "--poll-seconds"),
+) -> None:
+    def operation() -> dict[str, Any]:
+        runner = _render_runner(_service(context))
+        if no_wait:
+            return runner.submit(render_id)
+        return runner.execute(render_id, timeout_seconds=timeout_seconds, poll_seconds=poll_seconds)
+
+    _execute(context, operation)
+
+
+@render_app.command("wait")
+def render_wait(
+    context: typer.Context,
+    render_id: str,
+    timeout_seconds: float = typer.Option(1800, "--timeout"),
+    poll_seconds: float = typer.Option(3, "--poll-seconds"),
+) -> None:
+    _execute(
+        context,
+        lambda: _render_runner(_service(context)).wait(
+            render_id, timeout_seconds=timeout_seconds, poll_seconds=poll_seconds
+        ),
+    )
 
 
 @render_app.command("list")

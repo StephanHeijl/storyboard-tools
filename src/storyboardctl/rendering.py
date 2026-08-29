@@ -7,7 +7,7 @@ from typing import Any, Protocol, cast
 
 from storyboardctl.comfy.adapters import WorkflowAdapter, WorkflowContext
 from storyboardctl.compiler import probe_duration
-from storyboardctl.errors import Conflict, ExternalServiceFailure, NotFound
+from storyboardctl.errors import Conflict, ExternalServiceFailure, NotFound, StoryboardError
 from storyboardctl.models import RenderMode
 from storyboardctl.paths import resolve_project_path
 from storyboardctl.service import StoryboardService
@@ -46,6 +46,17 @@ class RenderRunner:
         timeout_seconds: float = 1800,
         poll_seconds: float = 3,
     ) -> dict[str, Any]:
+        self.submit(render_id)
+        return self.wait(render_id, timeout_seconds=timeout_seconds, poll_seconds=poll_seconds)
+
+    @staticmethod
+    def _error_context(details: dict[str, Any]) -> dict[str, Any]:
+        return {
+            key: details.get(key)
+            for key in ("render_id", "attempt_number", "workflow_path", "output_path", "comfy_prompt_id")
+        }
+
+    def submit(self, render_id: str) -> dict[str, Any]:
         details = self.service.render_details(render_id)
         if details["state"] != "planned":
             raise Conflict(f"render must be planned before execution: {details['state']}")
@@ -98,8 +109,33 @@ class RenderRunner:
             workflow_path.parent.mkdir(parents=True, exist_ok=True)
             workflow_path.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
             prompt_id = self.comfy.enqueue(workflow)
-            self.service.transition_render(render_id, "queued", comfy_prompt_id=prompt_id)
+            return self.service.transition_render(render_id, "queued", comfy_prompt_id=prompt_id)
+        except Exception as error:
+            current = self.service.render_details(render_id)
+            if current["state"] == "submitting":
+                self.service.transition_render(render_id, "failed", error_message=str(error))
+            context = self._error_context(current)
+            if isinstance(error, StoryboardError):
+                error.details = {**context, **error.details}
+                raise
+            raise ExternalServiceFailure(f"render submission failed: {error}", details=context) from error
+
+    def wait(
+        self,
+        render_id: str,
+        *,
+        timeout_seconds: float = 1800,
+        poll_seconds: float = 3,
+    ) -> dict[str, Any]:
+        details = self.service.render_details(render_id)
+        if details["state"] not in ("queued", "running", "timed_out"):
+            raise Conflict(f"render cannot be waited for from state: {details['state']}")
+        prompt_id = details.get("comfy_prompt_id")
+        if not prompt_id:
+            raise Conflict("render has no ComfyUI prompt ID to wait for")
+        if details["state"] in ("queued", "timed_out"):
             self.service.transition_render(render_id, "running")
+        try:
             history = self.comfy.wait_for_completion(
                 prompt_id,
                 timeout_seconds=timeout_seconds,
@@ -111,18 +147,16 @@ class RenderRunner:
             return self.service.complete_render(render_id, duration_seconds=duration)
         except Exception as error:
             current = self.service.render_details(render_id)
-            if current["state"] in ("submitting", "queued", "running"):
-                next_state = (
-                    "timed_out"
-                    if isinstance(error, ExternalServiceFailure)
-                    and "timed out" in str(error).lower()
-                    and current["comfy_prompt_id"]
-                    else "failed"
-                )
-                self.service.transition_render(render_id, next_state, error_message=str(error))
-            if isinstance(error, (Conflict, NotFound, ExternalServiceFailure)):
+            timed_out = isinstance(error, ExternalServiceFailure) and "timed out" in str(error).lower()
+            if current["state"] in ("queued", "running", "timed_out"):
+                next_state = "timed_out" if timed_out and current["comfy_prompt_id"] else "failed"
+                if next_state != current["state"]:
+                    self.service.transition_render(render_id, next_state, error_message=str(error))
+            context = self._error_context(current)
+            if isinstance(error, StoryboardError):
+                error.details = {**context, **error.details}
                 raise
-            raise ExternalServiceFailure(f"render execution failed: {error}") from error
+            raise ExternalServiceFailure(f"render wait failed: {error}", details=context) from error
 
     def _workflow_for(
         self,
@@ -147,26 +181,4 @@ class RenderRunner:
         timeout_seconds: float = 1800,
         poll_seconds: float = 3,
     ) -> dict[str, Any]:
-        details = self.service.render_details(render_id)
-        if details["state"] not in ("queued", "running", "timed_out"):
-            raise Conflict(f"render cannot be reconciled from state: {details['state']}")
-        prompt_id = details.get("comfy_prompt_id")
-        if not prompt_id:
-            raise Conflict("render has no ComfyUI prompt ID to reconcile")
-        if details["state"] == "timed_out":
-            self.service.transition_render(render_id, "running")
-        try:
-            history = self.comfy.wait_for_completion(
-                prompt_id, timeout_seconds=timeout_seconds, poll_seconds=poll_seconds
-            )
-            output_path = resolve_project_path(self.service.project_root, details["output_path"])
-            self.comfy.download(history, output_path)
-            return self.service.complete_render(render_id, duration_seconds=probe_duration(output_path))
-        except Exception as error:
-            current = self.service.render_details(render_id)
-            timed_out = isinstance(error, ExternalServiceFailure) and "timed out" in str(error).lower()
-            if current["state"] in ("queued", "running", "timed_out"):
-                next_state = "timed_out" if timed_out and current["comfy_prompt_id"] else "failed"
-                if next_state != current["state"]:
-                    self.service.transition_render(render_id, next_state, error_message=str(error))
-            raise
+        return self.wait(render_id, timeout_seconds=timeout_seconds, poll_seconds=poll_seconds)

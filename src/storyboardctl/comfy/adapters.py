@@ -33,6 +33,8 @@ class WorkflowAdapter(Protocol):
 
     def scrub_workflow(self, workflow: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]: ...
 
+    def requirements(self) -> dict[str, tuple[str, ...]]: ...
+
 
 class AdapterRegistry:
     def __init__(self) -> None:

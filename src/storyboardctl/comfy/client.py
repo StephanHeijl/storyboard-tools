@@ -15,6 +15,16 @@ from storyboardctl.errors import ExternalServiceFailure
 VIDEO_EXTENSIONS = (".mp4", ".webm", ".mov", ".mkv")
 
 
+def _all_strings(value: Any) -> set[str]:
+    if isinstance(value, str):
+        return {value}
+    if isinstance(value, dict):
+        return {item for child in value.values() for item in _all_strings(child)}
+    if isinstance(value, list):
+        return {item for child in value for item in _all_strings(child)}
+    return set()
+
+
 @dataclass(frozen=True)
 class ComfySettings:
     base_url: str = "http://127.0.0.1:8188"
@@ -75,6 +85,42 @@ class ComfyClient:
             return response
         except httpx.HTTPError as error:
             raise ExternalServiceFailure(f"ComfyUI request failed: {method} {path}: {error}") from error
+
+    def ping(self) -> dict[str, Any]:
+        payload = self._request("GET", "/system_stats").json()
+        system = payload.get("system", {})
+        return {
+            "ok": True,
+            "base_url": self.settings.base_url.rstrip("/"),
+            "comfyui_version": system.get("comfyui_version"),
+            "python_version": system.get("python_version"),
+            "devices": payload.get("devices", []),
+        }
+
+    def queue_status(self) -> dict[str, Any]:
+        payload = self._request("GET", "/queue").json()
+        running = payload.get("queue_running", [])
+        pending = payload.get("queue_pending", [])
+        return {
+            "running": len(running) if isinstance(running, list) else 0,
+            "pending": len(pending) if isinstance(pending, list) else 0,
+            "queue_running": running,
+            "queue_pending": pending,
+        }
+
+    def preflight(self, *, nodes: tuple[str, ...], models: tuple[str, ...]) -> dict[str, Any]:
+        payload = self._request("GET", "/object_info").json()
+        available_nodes = set(payload) if isinstance(payload, dict) else set()
+        available_values = _all_strings(payload)
+        missing_nodes = sorted(set(nodes) - available_nodes)
+        missing_models = sorted(set(models) - available_values)
+        return {
+            "ok": not missing_nodes and not missing_models,
+            "required_nodes": list(nodes),
+            "required_models": list(models),
+            "missing_nodes": missing_nodes,
+            "missing_models": missing_models,
+        }
 
     def upload_image(self, image_path: Path, *, remote_name: str | None = None) -> str:
         upload_name = remote_name or image_path.name

@@ -25,6 +25,33 @@ class H3Adapter:
     def __init__(self, models: H3Models | None = None) -> None:
         self.models = models or H3Models()
 
+    def requirements(self) -> dict[str, tuple[str, ...]]:
+        return {
+            "nodes": (
+                "UNETLoader",
+                "CLIPLoader",
+                "VAELoader",
+                "KSamplerSelect",
+                "RandomNoise",
+                "BasicScheduler",
+                "BasicGuider",
+                "SamplerCustomAdvanced",
+                "VAEDecode",
+                "VAEDecodeAudio",
+                "CreateVideo",
+                "SaveVideo",
+                "MiniMaxH3ImageToVideo",
+                "MiniMaxH3ReferenceToVideo",
+            ),
+            "models": (
+                self.models.fl2va_model,
+                self.models.ref2va_model,
+                self.models.clip_model,
+                self.models.video_vae,
+                self.models.audio_vae,
+            ),
+        }
+
     def scrub_workflow(self, workflow: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
         return workflow
 
