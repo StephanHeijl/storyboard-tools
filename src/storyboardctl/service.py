@@ -319,6 +319,132 @@ class StoryboardService:
             )
             return result
 
+    def list_renders(
+        self,
+        *,
+        version_name: str | None = None,
+        position: int | None = None,
+        state: str | None = None,
+    ) -> list[dict[str, Any]]:
+        conditions = ["vs.archived_at IS NULL"]
+        values: list[Any] = []
+        if version_name is not None:
+            conditions.append("sv.name = ?")
+            values.append(version_name)
+        if position is not None:
+            conditions.append("vs.position = ?")
+            values.append(position)
+        if state is not None:
+            conditions.append("r.state = ?")
+            values.append(state)
+        with self.database.connect() as connection:
+            if version_name is not None:
+                self._version(connection, version_name)
+            rows = connection.execute(
+                "SELECT r.id AS render_id, sv.name AS version, vs.position, s.shot_key, "
+                "r.revision_id, r.attempt_number, r.state, r.seed, r.comfy_prompt_id, "
+                "r.output_path, r.duration_seconds, r.error_message, r.created_at, "
+                "CASE WHEN ar.render_id = r.id THEN 1 ELSE 0 END AS approved "
+                "FROM renders r JOIN version_shots vs ON vs.revision_id = r.revision_id "
+                "JOIN storyboard_versions sv ON sv.id = vs.version_id "
+                "JOIN shots s ON s.id = vs.shot_id "
+                "LEFT JOIN approved_renders ar ON ar.render_id = r.id "
+                f"WHERE {' AND '.join(conditions)} "
+                "ORDER BY sv.name, vs.position, r.attempt_number",
+                values,
+            ).fetchall()
+        result = [dict(row) for row in rows]
+        for item in result:
+            item["approved"] = bool(item["approved"])
+        return result
+
+    def production_status(self, *, version_name: str | None = None) -> dict[str, Any]:
+        with self.database.connect() as connection:
+            production = connection.execute("SELECT slug, title FROM production WHERE id = 1").fetchone()
+            if production is None:
+                raise NotFound("production has not been imported")
+            if version_name is not None:
+                self._version(connection, version_name)
+            versions = connection.execute(
+                "SELECT id, name, snapshot, status FROM storyboard_versions "
+                "WHERE production_id = 1 AND (? IS NULL OR name = ?) ORDER BY created_at, name",
+                (version_name, version_name),
+            ).fetchall()
+            summaries: list[dict[str, Any]] = []
+            for version in versions:
+                shots = int(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM version_shots WHERE version_id = ? AND archived_at IS NULL",
+                        (version["id"],),
+                    ).fetchone()[0]
+                )
+                approved = int(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM version_shots vs JOIN approved_renders ar "
+                        "ON ar.revision_id = vs.revision_id WHERE vs.version_id = ? AND vs.archived_at IS NULL",
+                        (version["id"],),
+                    ).fetchone()[0]
+                )
+                states = {
+                    row["state"]: int(row["count"])
+                    for row in connection.execute(
+                        "SELECT r.state, COUNT(*) AS count FROM renders r JOIN version_shots vs "
+                        "ON vs.revision_id = r.revision_id WHERE vs.version_id = ? "
+                        "AND vs.archived_at IS NULL GROUP BY r.state ORDER BY r.state",
+                        (version["id"],),
+                    ).fetchall()
+                }
+                compilations = int(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM compilations WHERE version_id = ?",
+                        (version["id"],),
+                    ).fetchone()[0]
+                )
+                summaries.append(
+                    {
+                        "version": version["name"],
+                        "snapshot": int(version["snapshot"]),
+                        "status": version["status"],
+                        "shots": shots,
+                        "approved_shots": approved,
+                        "unapproved_shots": shots - approved,
+                        "render_states": states,
+                        "compilations": compilations,
+                        "ready_to_compile": shots > 0 and shots == approved,
+                    }
+                )
+        return {"production": dict(production), "versions": summaries}
+
+    def audit_storyboard(self, version_name: str) -> dict[str, Any]:
+        with self.database.connect() as connection:
+            version = self._version(connection, version_name)
+            rows = connection.execute(
+                "SELECT vs.position, s.shot_key, ar.render_id, "
+                "(SELECT r.state FROM renders r WHERE r.revision_id = vs.revision_id "
+                " ORDER BY r.attempt_number DESC LIMIT 1) AS latest_render_state "
+                "FROM version_shots vs JOIN shots s ON s.id = vs.shot_id "
+                "LEFT JOIN approved_renders ar ON ar.revision_id = vs.revision_id "
+                "WHERE vs.version_id = ? AND vs.archived_at IS NULL ORDER BY vs.position",
+                (version["id"],),
+            ).fetchall()
+        issues = [
+            {
+                "code": "missing_approved_render",
+                "position": int(row["position"]),
+                "shot_key": row["shot_key"],
+                "latest_render_state": row["latest_render_state"],
+            }
+            for row in rows
+            if row["render_id"] is None
+        ]
+        return {
+            "version": version_name,
+            "snapshot": int(version["snapshot"]),
+            "shots": len(rows),
+            "ready_to_compile": bool(rows) and not issues,
+            "issues": issues,
+        }
+
     def _shot_spec_from_row(self, connection: sqlite3.Connection, row: sqlite3.Row) -> ShotSpec:
         revision_id = row["revision_id"]
         assets = [

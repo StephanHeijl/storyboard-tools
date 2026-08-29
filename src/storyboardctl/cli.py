@@ -34,6 +34,7 @@ asset_app = typer.Typer(help="Manage project media assets.")
 render_app = typer.Typer(help="Plan and execute ComfyUI renders.")
 review_app = typer.Typer(help="Review completed render attempts.")
 compile_app = typer.Typer(help="Create manifests and assemble approved renders.")
+production_app = typer.Typer(help="Inspect production-wide state and readiness.")
 app.add_typer(import_app, name="import")
 app.add_typer(storyboard_app, name="storyboard")
 app.add_typer(shot_app, name="shot")
@@ -41,6 +42,7 @@ app.add_typer(asset_app, name="asset")
 app.add_typer(render_app, name="render")
 app.add_typer(review_app, name="review")
 app.add_typer(compile_app, name="compile")
+app.add_typer(production_app, name="production")
 
 
 @dataclass(frozen=True)
@@ -177,6 +179,19 @@ def import_spec(
 @storyboard_app.command("list")
 def storyboard_list(context: typer.Context) -> None:
     _execute(context, lambda: _service(context).list_versions())
+
+
+@storyboard_app.command("audit")
+def storyboard_audit(context: typer.Context, version: str) -> None:
+    _execute(context, lambda: _service(context).audit_storyboard(version))
+
+
+@production_app.command("status")
+def production_status(
+    context: typer.Context,
+    version: str | None = typer.Option(None, "--version"),
+) -> None:
+    _execute(context, lambda: _service(context).production_status(version_name=version))
 
 
 @storyboard_app.command("clone")
@@ -409,6 +424,19 @@ def render_rerender(
 @render_app.command("status")
 def render_status(context: typer.Context, render_id: str) -> None:
     _execute(context, lambda: _service(context).render_details(render_id))
+
+
+@render_app.command("list")
+def render_list(
+    context: typer.Context,
+    version: str | None = typer.Option(None, "--version"),
+    position: int | None = typer.Option(None, "--position"),
+    state: str | None = typer.Option(None, "--state"),
+) -> None:
+    _execute(
+        context,
+        lambda: _service(context).list_renders(version_name=version, position=position, state=state),
+    )
 
 
 @render_app.command("reconcile")

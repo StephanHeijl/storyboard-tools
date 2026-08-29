@@ -104,3 +104,18 @@ def test_table_format_is_available_for_interactive_use(tmp_path) -> None:
     )
     assert "name" in result.stdout
     assert "v1" in result.stdout
+
+
+def test_status_audit_and_render_list_commands_emit_json(tmp_path) -> None:
+    write_spec(tmp_path)
+    invoke(tmp_path, "init")
+    invoke(tmp_path, "import", "spec", "spec.json")
+    invoke(tmp_path, "render", "shot", "v1", "10", "--plan-only")
+
+    renders = invoke(tmp_path, "render", "list", "--version", "v1", "--position", "10")
+    status = invoke(tmp_path, "production", "status", "--version", "v1")
+    audit = invoke(tmp_path, "storyboard", "audit", "v1")
+
+    assert json.loads(renders.stdout)[0]["position"] == 10
+    assert json.loads(status.stdout)["versions"][0]["shots"] == 1
+    assert json.loads(audit.stdout)["issues"][0]["code"] == "missing_approved_render"
