@@ -95,6 +95,29 @@ class Compiler:
                 "WHERE vs.version_id = ? AND vs.archived_at IS NULL ORDER BY vs.position",
                 (version["id"],),
             ).fetchall()
+            music_by_revision = {
+                row["revision_id"]: [
+                    {
+                        "cue_key": music["cue_key"],
+                        "title": music["title"],
+                        "asset_path": music["asset_path"],
+                        "relationship": music["relationship"],
+                        "offset_seconds": float(music["offset_seconds"]),
+                        "gain_db": music["gain_db"],
+                        "fade_in_seconds": music["fade_in_seconds"],
+                        "fade_out_seconds": music["fade_out_seconds"],
+                    }
+                    for music in connection.execute(
+                        "SELECT mc.cue_key, mc.title, a.path AS asset_path, sm.relationship, "
+                        "sm.offset_seconds, sm.gain_db, sm.fade_in_seconds, sm.fade_out_seconds "
+                        "FROM shot_music sm JOIN music_cues mc ON mc.id = sm.music_cue_id "
+                        "JOIN assets a ON a.id = mc.asset_id WHERE sm.revision_id = ? "
+                        "ORDER BY mc.cue_key",
+                        (row["revision_id"],),
+                    ).fetchall()
+                ]
+                for row in rows
+            }
         if not rows:
             raise Conflict(f"storyboard version has no active shots: {version_name}")
 
@@ -124,6 +147,7 @@ class Compiler:
                     "source_path": row["output_path"],
                     "source_sha256": row["output_sha256"],
                     "duration_seconds": float(row["intended_duration"]),
+                    "music": music_by_revision[row["revision_id"]],
                 }
             )
 

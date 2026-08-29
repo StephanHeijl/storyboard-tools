@@ -7,7 +7,15 @@ import pytest
 from storyboardctl.compiler import CompilationSettings, Compiler
 from storyboardctl.database import Database
 from storyboardctl.errors import Conflict, IntegrityFailure
-from storyboardctl.models import ProjectSpec, ShotSpec, StoryboardSpec
+from storyboardctl.models import (
+    AssetKind,
+    AssetSpec,
+    MusicCueSpec,
+    MusicRelationship,
+    ProjectSpec,
+    ShotSpec,
+    StoryboardSpec,
+)
 from storyboardctl.service import StoryboardService
 
 
@@ -19,6 +27,8 @@ def prepared_service(tmp_path, *, approve_second: bool = True) -> StoryboardServ
         ProjectSpec(
             slug="compile",
             title="Compile",
+            assets=[AssetSpec(key="theme-audio", kind=AssetKind.audio, path="assets/theme.wav")],
+            music=[MusicCueSpec(key="theme", asset_key="theme-audio", title="Theme")],
             storyboard=StoryboardSpec(
                 name="v1",
                 title="V1",
@@ -29,6 +39,7 @@ def prepared_service(tmp_path, *, approve_second: bool = True) -> StoryboardServ
                         description="One",
                         prompt="One",
                         duration_seconds=1,
+                        music={"theme": MusicRelationship.starts_here},
                     ),
                     ShotSpec(
                         key="two",
@@ -64,6 +75,19 @@ def test_manifest_selects_approved_renders_in_order_and_numbers_snapshots(tmp_pa
     assert first["compilation_number"] == 1
     assert second["compilation_number"] == 2
     assert first["manifest_path"] != second["manifest_path"]
+    assert first["music_mixed"] is False
+    assert first["items"][0]["music"] == [
+        {
+            "cue_key": "theme",
+            "title": "Theme",
+            "asset_path": "assets/theme.wav",
+            "relationship": "starts_here",
+            "offset_seconds": 0.0,
+            "gain_db": None,
+            "fade_in_seconds": None,
+            "fade_out_seconds": None,
+        }
+    ]
     on_disk = json.loads((tmp_path / first["manifest_path"]).read_text(encoding="utf-8"))
     assert on_disk == first
     assert all(item["source_sha256"] for item in first["items"])
