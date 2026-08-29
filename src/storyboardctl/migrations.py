@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-
 MIGRATION_1 = """
 CREATE TABLE production (
     id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -209,4 +208,3 @@ CREATE UNIQUE INDEX events_idempotency
 
 
 MIGRATIONS: tuple[tuple[int, str], ...] = ((1, MIGRATION_1),)
-

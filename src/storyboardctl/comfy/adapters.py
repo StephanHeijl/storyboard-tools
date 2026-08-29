@@ -44,4 +44,3 @@ class AdapterRegistry:
             return self._adapters[name]
         except KeyError as error:
             raise NotFound(f"workflow adapter not found: {name}") from error
-

@@ -25,9 +25,7 @@ class H3Adapter:
     def __init__(self, models: H3Models | None = None) -> None:
         self.models = models or H3Models()
 
-    def scrub_workflow(
-        self, workflow: dict[str, dict[str, Any]]
-    ) -> dict[str, dict[str, Any]]:
+    def scrub_workflow(self, workflow: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
         return workflow
 
     def build_workflow(self, context: WorkflowContext) -> dict[str, dict[str, Any]]:

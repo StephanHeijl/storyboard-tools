@@ -32,17 +32,13 @@ class Database:
                 "CREATE TABLE IF NOT EXISTS schema_migrations ("
                 "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
             )
-            installed = {
-                int(row[0])
-                for row in connection.execute("SELECT version FROM schema_migrations").fetchall()
-            }
+            installed = {int(row[0]) for row in connection.execute("SELECT version FROM schema_migrations").fetchall()}
             for version, sql in MIGRATIONS:
                 if version in installed:
                     continue
                 try:
                     connection.executescript(
-                        f"BEGIN IMMEDIATE;\n{sql}\n"
-                        f"INSERT INTO schema_migrations(version) VALUES ({version});\nCOMMIT;"
+                        f"BEGIN IMMEDIATE;\n{sql}\nINSERT INTO schema_migrations(version) VALUES ({version});\nCOMMIT;"
                     )
                 except Exception:
                     if connection.in_transaction:
@@ -60,4 +56,3 @@ class Database:
                 raise
             else:
                 connection.commit()
-

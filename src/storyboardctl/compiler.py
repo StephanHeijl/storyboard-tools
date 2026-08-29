@@ -8,7 +8,7 @@ import uuid
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from storyboardctl.database import Database
 from storyboardctl.errors import Conflict, ExternalServiceFailure, IntegrityFailure, NotFound
@@ -54,7 +54,7 @@ def _probe(path: Path) -> dict[str, Any]:
     except (OSError, subprocess.CalledProcessError) as error:
         detail = getattr(error, "stderr", "") or str(error)
         raise ExternalServiceFailure(f"ffprobe failed for {path}: {detail}") from error
-    return json.loads(result.stdout)
+    return cast(dict[str, Any], json.loads(result.stdout))
 
 
 def probe_duration(path: str | Path) -> float:
@@ -75,14 +75,11 @@ class Compiler:
         self.database = database
         self.project_root = Path(project_root).resolve()
 
-    def create_manifest(
-        self, version_name: str, settings: CompilationSettings | None = None
-    ) -> dict[str, Any]:
+    def create_manifest(self, version_name: str, settings: CompilationSettings | None = None) -> dict[str, Any]:
         resolved_settings = settings or CompilationSettings()
         with self.database.connect() as connection:
             version = connection.execute(
-                "SELECT id, name, snapshot FROM storyboard_versions "
-                "WHERE production_id = 1 AND name = ?",
+                "SELECT id, name, snapshot FROM storyboard_versions WHERE production_id = 1 AND name = ?",
                 (version_name,),
             ).fetchone()
             if version is None:
@@ -107,9 +104,7 @@ class Compiler:
                 raise Conflict(f"no approved render for shot {row['position']}")
             if row["output_path"] is None or row["output_sha256"] is None:
                 raise IntegrityFailure(f"approved render has incomplete provenance for shot {row['position']}")
-            source = resolve_project_path(
-                self.project_root, row["output_path"], must_exist=True
-            )
+            source = resolve_project_path(self.project_root, row["output_path"], must_exist=True)
             actual_hash = file_sha256(source)
             if actual_hash != row["output_sha256"]:
                 raise IntegrityFailure(
@@ -117,9 +112,7 @@ class Compiler:
                     details={"expected": row["output_sha256"], "actual": actual_hash},
                 )
             if float(row["render_duration"] or 0) + 0.001 < float(row["intended_duration"]):
-                raise IntegrityFailure(
-                    f"approved render for shot {row['position']} is shorter than intended duration"
-                )
+                raise IntegrityFailure(f"approved render for shot {row['position']} is shorter than intended duration")
             items.append(
                 {
                     "order": index,
@@ -142,8 +135,7 @@ class Compiler:
                 raise Conflict("storyboard changed while compilation manifest was being prepared")
             number = int(
                 connection.execute(
-                    "SELECT COALESCE(MAX(compilation_number), 0) + 1 FROM compilations "
-                    "WHERE version_id = ?",
+                    "SELECT COALESCE(MAX(compilation_number), 0) + 1 FROM compilations WHERE version_id = ?",
                     (version["id"],),
                 ).fetchone()[0]
             )
@@ -199,26 +191,20 @@ class Compiler:
         temporary.replace(destination)
         return manifest
 
-    def build(
-        self, version_name: str, settings: CompilationSettings | None = None
-    ) -> dict[str, Any]:
+    def build(self, version_name: str, settings: CompilationSettings | None = None) -> dict[str, Any]:
         manifest = self.create_manifest(version_name, settings)
         compilation_id = manifest["compilation_id"]
         resolved = CompilationSettings(**manifest["settings"])
         output = resolve_project_path(self.project_root, manifest["output_path"])
         output.parent.mkdir(parents=True, exist_ok=True)
         with self.database.transaction(write=True) as connection:
-            connection.execute(
-                "UPDATE compilations SET state = 'building' WHERE id = ?", (compilation_id,)
-            )
+            connection.execute("UPDATE compilations SET state = 'building' WHERE id = ?", (compilation_id,))
         try:
             with tempfile.TemporaryDirectory(prefix="storyboardctl-", dir=output.parent) as directory:
                 temp_root = Path(directory)
                 normalized: list[Path] = []
                 for item in manifest["items"]:
-                    source = resolve_project_path(
-                        self.project_root, item["source_path"], must_exist=True
-                    )
+                    source = resolve_project_path(self.project_root, item["source_path"], must_exist=True)
                     duration = float(item["duration_seconds"])
                     target = temp_root / f"shot_{item['order']:04d}.mp4"
                     command = [
@@ -269,9 +255,7 @@ class Compiler:
                     subprocess.run(command, check=True, capture_output=True, text=True)
                     normalized.append(target)
                 concat_file = temp_root / "concat.txt"
-                concat_file.write_text(
-                    "".join(f"file '{path.as_posix()}'\n" for path in normalized), encoding="utf-8"
-                )
+                concat_file.write_text("".join(f"file '{path.as_posix()}'\n" for path in normalized), encoding="utf-8")
                 staged_output = temp_root / "assembled.mp4"
                 subprocess.run(
                     [
@@ -306,8 +290,7 @@ class Compiler:
         digest = file_sha256(output)
         with self.database.transaction(write=True) as connection:
             connection.execute(
-                "UPDATE compilations SET state = 'completed', output_sha256 = ?, completed_at = ? "
-                "WHERE id = ?",
+                "UPDATE compilations SET state = 'completed', output_sha256 = ?, completed_at = ? WHERE id = ?",
                 (digest, _now(), compilation_id),
             )
         return {

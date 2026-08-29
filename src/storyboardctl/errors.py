@@ -38,4 +38,3 @@ class ExternalServiceFailure(StoryboardError):
 class IntegrityFailure(StoryboardError):
     code = "integrity_error"
     exit_code = 6
-

@@ -7,11 +7,11 @@ import sqlite3
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from storyboardctl.database import Database
 from storyboardctl.errors import Conflict, NotFound
-from storyboardctl.models import AssetKind, ProjectSpec, ShotAssetSpec, ShotSpec
+from storyboardctl.models import AssetKind, AssetRole, ProjectSpec, ShotAssetSpec, ShotSpec
 from storyboardctl.paths import file_sha256, normalize_relative_path, resolve_project_path
 
 
@@ -32,9 +32,7 @@ class StoryboardService:
         self.database = database
         self.project_root = Path(project_root).resolve()
 
-    def _existing_idempotent(
-        self, connection: sqlite3.Connection, key: str | None
-    ) -> dict[str, Any] | None:
+    def _existing_idempotent(self, connection: sqlite3.Connection, key: str | None) -> dict[str, Any] | None:
         if key is None:
             return None
         row = connection.execute(
@@ -71,9 +69,7 @@ class StoryboardService:
             ),
         )
 
-    def import_spec(
-        self, spec: ProjectSpec, *, idempotency_key: str | None = None
-    ) -> dict[str, Any]:
+    def import_spec(self, spec: ProjectSpec, *, idempotency_key: str | None = None) -> dict[str, Any]:
         with self.database.transaction(write=True) as connection:
             existing_production = connection.execute("SELECT id FROM production").fetchone()
             if existing_production is not None:
@@ -164,9 +160,7 @@ class StoryboardService:
             )
             return result
 
-    def _insert_revision(
-        self, connection: sqlite3.Connection, shot_id: str, shot: ShotSpec
-    ) -> tuple[str, int]:
+    def _insert_revision(self, connection: sqlite3.Connection, shot_id: str, shot: ShotSpec) -> tuple[str, int]:
         content = shot.model_dump(mode="json", exclude={"position"})
         content_hash = hashlib.sha256(_json(content).encode()).hexdigest()
         existing = connection.execute(
@@ -212,8 +206,7 @@ class StoryboardService:
             if asset is None:
                 raise NotFound(f"asset not found: {linked.asset_key}")
             connection.execute(
-                "INSERT INTO shot_assets(revision_id, asset_id, role, sort_order, notes) "
-                "VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO shot_assets(revision_id, asset_id, role, sort_order, notes) VALUES (?, ?, ?, ?, ?)",
                 (revision_id, asset["id"], linked.role.value, linked.order, linked.notes),
             )
         for link in shot.links:
@@ -248,9 +241,7 @@ class StoryboardService:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def _version(
-        self, connection: sqlite3.Connection, name: str, *, mutable: bool = False
-    ) -> sqlite3.Row:
+    def _version(self, connection: sqlite3.Connection, name: str, *, mutable: bool = False) -> sqlite3.Row:
         row = connection.execute(
             "SELECT * FROM storyboard_versions WHERE production_id = 1 AND name = ?", (name,)
         ).fetchone()
@@ -258,14 +249,12 @@ class StoryboardService:
             raise NotFound(f"storyboard version not found: {name}")
         if mutable and row["status"] != "draft":
             raise Conflict(f"storyboard {name!r} is {row['status']} and cannot be changed")
-        return row
+        return cast(sqlite3.Row, row)
 
     @staticmethod
     def _check_snapshot(row: sqlite3.Row, expected: int | None) -> None:
         if expected is not None and int(row["snapshot"]) != expected:
-            raise Conflict(
-                f"storyboard snapshot conflict: expected {expected}, found {row['snapshot']}"
-            )
+            raise Conflict(f"storyboard snapshot conflict: expected {expected}, found {row['snapshot']}")
 
     def list_shots(self, version_name: str, *, include_archived: bool = False) -> list[dict[str, Any]]:
         with self.database.connect() as connection:
@@ -289,9 +278,7 @@ class StoryboardService:
             results.append(result)
         return results
 
-    def clone_storyboard(
-        self, source_name: str, new_name: str, *, title: str | None = None
-    ) -> dict[str, Any]:
+    def clone_storyboard(self, source_name: str, new_name: str, *, title: str | None = None) -> dict[str, Any]:
         with self.database.transaction(write=True) as connection:
             source = self._version(connection, source_name)
             if connection.execute(
@@ -329,9 +316,7 @@ class StoryboardService:
             )
             return result
 
-    def _shot_spec_from_row(
-        self, connection: sqlite3.Connection, row: sqlite3.Row
-    ) -> ShotSpec:
+    def _shot_spec_from_row(self, connection: sqlite3.Connection, row: sqlite3.Row) -> ShotSpec:
         revision_id = row["revision_id"]
         assets = [
             {
@@ -416,8 +401,7 @@ class StoryboardService:
             revision_id, revision_number = self._insert_revision(connection, row["shot_id"], revised)
             now = _now()
             connection.execute(
-                "UPDATE version_shots SET revision_id = ?, updated_at = ? "
-                "WHERE version_id = ? AND shot_id = ?",
+                "UPDATE version_shots SET revision_id = ?, updated_at = ? WHERE version_id = ? AND shot_id = ?",
                 (revision_id, now, version["id"], row["shot_id"]),
             )
             snapshot = int(version["snapshot"]) + 1
@@ -449,8 +433,7 @@ class StoryboardService:
             active_positions = [
                 int(row[0])
                 for row in connection.execute(
-                    "SELECT position FROM version_shots WHERE version_id = ? AND archived_at IS NULL "
-                    "ORDER BY position",
+                    "SELECT position FROM version_shots WHERE version_id = ? AND archived_at IS NULL ORDER BY position",
                     (version["id"],),
                 ).fetchall()
             ]
@@ -465,9 +448,7 @@ class StoryboardService:
                 if following is None:
                     position = after_position + 10
                 elif following - after_position <= 1:
-                    raise Conflict(
-                        "no integer position remains between shots; run storyboard renumber --step 10"
-                    )
+                    raise Conflict("no integer position remains between shots; run storyboard renumber --step 10")
                 else:
                     position = (after_position + following) // 2
             if position in active_positions:
@@ -515,16 +496,14 @@ class StoryboardService:
             version = self._version(connection, version_name, mutable=True)
             self._check_snapshot(version, expect_snapshot)
             row = connection.execute(
-                "SELECT shot_id FROM version_shots WHERE version_id = ? AND position = ? "
-                "AND archived_at IS NULL",
+                "SELECT shot_id FROM version_shots WHERE version_id = ? AND position = ? AND archived_at IS NULL",
                 (version["id"], position),
             ).fetchone()
             if row is None:
                 raise NotFound(f"active shot not found at position {position}")
             now = _now()
             connection.execute(
-                "UPDATE version_shots SET archived_at = ?, updated_at = ? "
-                "WHERE version_id = ? AND shot_id = ?",
+                "UPDATE version_shots SET archived_at = ?, updated_at = ? WHERE version_id = ? AND shot_id = ?",
                 (now, now, version["id"], row["shot_id"]),
             )
             snapshot = int(version["snapshot"]) + 1
@@ -549,21 +528,18 @@ class StoryboardService:
             version = self._version(connection, version_name, mutable=True)
             self._check_snapshot(version, expect_snapshot)
             rows = connection.execute(
-                "SELECT shot_id FROM version_shots WHERE version_id = ? AND archived_at IS NULL "
-                "ORDER BY position",
+                "SELECT shot_id FROM version_shots WHERE version_id = ? AND archived_at IS NULL ORDER BY position",
                 (version["id"],),
             ).fetchall()
             now = _now()
             for index, row in enumerate(rows, start=1):
                 connection.execute(
-                    "UPDATE version_shots SET position = ?, updated_at = ? "
-                    "WHERE version_id = ? AND shot_id = ?",
+                    "UPDATE version_shots SET position = ?, updated_at = ? WHERE version_id = ? AND shot_id = ?",
                     (1_000_000_000 + index, now, version["id"], row["shot_id"]),
                 )
             for index, row in enumerate(rows, start=1):
                 connection.execute(
-                    "UPDATE version_shots SET position = ?, updated_at = ? "
-                    "WHERE version_id = ? AND shot_id = ?",
+                    "UPDATE version_shots SET position = ?, updated_at = ? WHERE version_id = ? AND shot_id = ?",
                     (index * step, now, version["id"], row["shot_id"]),
                 )
             snapshot = int(version["snapshot"]) + 1
@@ -586,8 +562,7 @@ class StoryboardService:
             snapshot = int(version["snapshot"]) + 1
             now = _now()
             connection.execute(
-                "UPDATE storyboard_versions SET status = 'locked', snapshot = ?, updated_at = ? "
-                "WHERE id = ?",
+                "UPDATE storyboard_versions SET status = 'locked', snapshot = ?, updated_at = ? WHERE id = ?",
                 (snapshot, now, version["id"]),
             )
             result = {"version": version_name, "status": "locked", "snapshot": snapshot}
@@ -608,9 +583,7 @@ class StoryboardService:
         absolute = resolve_project_path(self.project_root, relative, must_exist=True)
         digest = file_sha256(absolute)
         with self.database.transaction(write=True) as connection:
-            if connection.execute(
-                "SELECT 1 FROM assets WHERE production_id = 1 AND asset_key = ?", (key,)
-            ).fetchone():
+            if connection.execute("SELECT 1 FROM assets WHERE production_id = 1 AND asset_key = ?", (key,)).fetchone():
                 raise Conflict(f"asset key already exists: {key}")
             asset_id = _id()
             connection.execute(
@@ -637,8 +610,7 @@ class StoryboardService:
 
         with self.database.connect() as connection:
             row = connection.execute(
-                "SELECT id, path, sha256 FROM assets WHERE production_id = 1 AND asset_key = ? "
-                "AND archived_at IS NULL",
+                "SELECT id, path, sha256 FROM assets WHERE production_id = 1 AND asset_key = ? AND archived_at IS NULL",
                 (key,),
             ).fetchone()
         if row is None:
@@ -652,9 +624,7 @@ class StoryboardService:
             )
         return {"asset_id": row["id"], "key": key, "verified": True, "sha256": actual}
 
-    def _active_shot_row(
-        self, connection: sqlite3.Connection, version_id: str, position: int
-    ) -> sqlite3.Row:
+    def _active_shot_row(self, connection: sqlite3.Connection, version_id: str, position: int) -> sqlite3.Row:
         row = connection.execute(
             "SELECT s.shot_key, vs.*, sr.* FROM version_shots vs "
             "JOIN shots s ON s.id = vs.shot_id JOIN shot_revisions sr ON sr.id = vs.revision_id "
@@ -663,7 +633,7 @@ class StoryboardService:
         ).fetchone()
         if row is None:
             raise NotFound(f"active shot not found at position {position}")
-        return row
+        return cast(sqlite3.Row, row)
 
     def link_asset(
         self,
@@ -679,18 +649,23 @@ class StoryboardService:
         with self.database.transaction(write=True) as connection:
             version = self._version(connection, version_name, mutable=True)
             self._check_snapshot(version, expect_snapshot)
-            if connection.execute(
-                "SELECT 1 FROM assets WHERE production_id = 1 AND asset_key = ? "
-                "AND archived_at IS NULL",
-                (asset_key,),
-            ).fetchone() is None:
+            if (
+                connection.execute(
+                    "SELECT 1 FROM assets WHERE production_id = 1 AND asset_key = ? AND archived_at IS NULL",
+                    (asset_key,),
+                ).fetchone()
+                is None
+            ):
                 raise NotFound(f"asset not found: {asset_key}")
             row = self._active_shot_row(connection, version["id"], position)
             current = self._shot_spec_from_row(connection, row)
             payload = current.model_dump(mode="json")
             payload["assets"].append(
                 ShotAssetSpec(
-                    asset_key=asset_key, role=role, order=order, notes=notes
+                    asset_key=asset_key,
+                    role=AssetRole(role),
+                    order=order,
+                    notes=notes,
                 ).model_dump(mode="json")
             )
             revised = ShotSpec.model_validate(payload)
@@ -698,8 +673,7 @@ class StoryboardService:
             now = _now()
             snapshot = int(version["snapshot"]) + 1
             connection.execute(
-                "UPDATE version_shots SET revision_id = ?, updated_at = ? "
-                "WHERE version_id = ? AND shot_id = ?",
+                "UPDATE version_shots SET revision_id = ?, updated_at = ? WHERE version_id = ? AND shot_id = ?",
                 (revision_id, now, version["id"], row["shot_id"]),
             )
             connection.execute(
@@ -728,9 +702,7 @@ class StoryboardService:
         settings: dict[str, Any],
         source_render_id: str | None = None,
     ) -> dict[str, Any]:
-        revision = connection.execute(
-            "SELECT prompt FROM shot_revisions WHERE id = ?", (revision_id,)
-        ).fetchone()
+        revision = connection.execute("SELECT prompt FROM shot_revisions WHERE id = ?", (revision_id,)).fetchone()
         if revision is None:
             raise NotFound(f"shot revision not found: {revision_id}")
         attempt = int(
@@ -812,7 +784,7 @@ class StoryboardService:
         row = connection.execute("SELECT * FROM renders WHERE id = ?", (render_id,)).fetchone()
         if row is None:
             raise NotFound(f"render not found: {render_id}")
-        return row
+        return cast(sqlite3.Row, row)
 
     def retry_render(self, render_id: str) -> dict[str, Any]:
         with self.database.transaction(write=True) as connection:
@@ -878,7 +850,11 @@ class StoryboardService:
                 values.append(now)
             values.append(render_id)
             connection.execute(f"UPDATE renders SET {', '.join(fields)} WHERE id = ?", values)
-            result = {"render_id": render_id, "state": state, "comfy_prompt_id": comfy_prompt_id or row["comfy_prompt_id"]}
+            result = {
+                "render_id": render_id,
+                "state": state,
+                "comfy_prompt_id": comfy_prompt_id or row["comfy_prompt_id"],
+            }
             self._event(connection, "render.transitioned", result, entity_type="render", entity_id=render_id)
             return result
 
@@ -895,7 +871,13 @@ class StoryboardService:
                 "UPDATE renders SET output_sha256 = ?, duration_seconds = ? WHERE id = ?",
                 (digest, duration_seconds, render_id),
             )
-        result.update({"output_path": row["output_path"], "output_sha256": digest, "duration_seconds": duration_seconds})
+        result.update(
+            {
+                "output_path": row["output_path"],
+                "output_sha256": digest,
+                "duration_seconds": duration_seconds,
+            }
+        )
         return result
 
     def _review_render(
@@ -931,9 +913,7 @@ class StoryboardService:
     ) -> dict[str, Any]:
         return self._review_render(render_id, "approved", reviewer=reviewer, notes=notes)
 
-    def reject_render(
-        self, render_id: str, *, reviewer: str | None = None, notes: str | None = None
-    ) -> dict[str, Any]:
+    def reject_render(self, render_id: str, *, reviewer: str | None = None, notes: str | None = None) -> dict[str, Any]:
         return self._review_render(render_id, "rejected", reviewer=reviewer, notes=notes)
 
     def approved_render(self, version_name: str, position: int) -> dict[str, Any] | None:
@@ -941,8 +921,7 @@ class StoryboardService:
             version = self._version(connection, version_name)
             row = self._active_shot_row(connection, version["id"], position)
             approved = connection.execute(
-                "SELECT r.* FROM approved_renders ar JOIN renders r ON r.id = ar.render_id "
-                "WHERE ar.revision_id = ?",
+                "SELECT r.* FROM approved_renders ar JOIN renders r ON r.id = ar.render_id WHERE ar.revision_id = ?",
                 (row["revision_id"],),
             ).fetchone()
         if approved is None:
@@ -961,3 +940,29 @@ class StoryboardService:
                 (render_id,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def render_details(self, render_id: str) -> dict[str, Any]:
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT r.*, sr.prompt, sr.duration_seconds AS intended_duration_seconds, "
+                "sr.render_mode, sr.adapter FROM renders r JOIN shot_revisions sr "
+                "ON sr.id = r.revision_id WHERE r.id = ?",
+                (render_id,),
+            ).fetchone()
+            if row is None:
+                raise NotFound(f"render not found: {render_id}")
+            assets = [
+                dict(asset)
+                for asset in connection.execute(
+                    "SELECT a.asset_key, a.path, a.sha256, sa.role, sa.sort_order "
+                    "FROM shot_assets sa JOIN assets a ON a.id = sa.asset_id "
+                    "WHERE sa.revision_id = ? AND a.archived_at IS NULL "
+                    "ORDER BY sa.role, sa.sort_order",
+                    (row["revision_id"],),
+                ).fetchall()
+            ]
+        result = dict(row)
+        result["render_id"] = result.pop("id")
+        result["settings"] = json.loads(result.pop("settings_json"))
+        result["assets"] = assets
+        return result

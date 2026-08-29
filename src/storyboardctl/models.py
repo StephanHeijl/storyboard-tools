@@ -135,9 +135,7 @@ class StoryboardSpec(StrictModel):
         for shot in self.shots:
             for link in shot.links:
                 if link.target_shot_key not in key_set:
-                    raise ValueError(
-                        f"shot {shot.key!r} links to unknown shot {link.target_shot_key!r}"
-                    )
+                    raise ValueError(f"shot {shot.key!r} links to unknown shot {link.target_shot_key!r}")
         return self
 
 
@@ -166,9 +164,7 @@ class ProjectSpec(StrictModel):
         for shot in self.storyboard.shots:
             for linked in shot.assets:
                 if linked.asset_key not in asset_set:
-                    raise ValueError(
-                        f"shot {shot.key!r} references unknown asset {linked.asset_key!r}"
-                    )
+                    raise ValueError(f"shot {shot.key!r} references unknown asset {linked.asset_key!r}")
             for music_key in shot.music:
                 if music_key not in music_set:
                     raise ValueError(f"shot {shot.key!r} references unknown music {music_key!r}")

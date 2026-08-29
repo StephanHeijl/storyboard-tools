@@ -12,7 +12,6 @@ import httpx
 
 from storyboardctl.errors import ExternalServiceFailure
 
-
 VIDEO_EXTENSIONS = (".mp4", ".webm", ".mov", ".mkv")
 
 
@@ -75,9 +74,7 @@ class ComfyClient:
             response.raise_for_status()
             return response
         except httpx.HTTPError as error:
-            raise ExternalServiceFailure(
-                f"ComfyUI request failed: {method} {path}: {error}"
-            ) from error
+            raise ExternalServiceFailure(f"ComfyUI request failed: {method} {path}: {error}") from error
 
     def upload_image(self, image_path: Path) -> str:
         media_type = mimetypes.guess_type(image_path.name)[0] or "application/octet-stream"
@@ -145,4 +142,3 @@ class ComfyClient:
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(response.content)
         return destination
-

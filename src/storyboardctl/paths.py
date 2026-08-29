@@ -20,9 +20,7 @@ def normalize_relative_path(value: str) -> str:
     return path.as_posix()
 
 
-def resolve_project_path(
-    project_root: str | Path, relative_path: str, *, must_exist: bool = False
-) -> Path:
+def resolve_project_path(project_root: str | Path, relative_path: str, *, must_exist: bool = False) -> Path:
     root = Path(project_root).resolve()
     relative = normalize_relative_path(relative_path)
     candidate = (root / relative).resolve(strict=False)
@@ -41,4 +39,3 @@ def file_sha256(path: str | Path, *, chunk_size: int = 1024 * 1024) -> str:
         while chunk := stream.read(chunk_size):
             digest.update(chunk)
     return digest.hexdigest()
-
