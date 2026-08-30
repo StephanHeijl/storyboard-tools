@@ -199,9 +199,12 @@ storyboardctl compile list --version v1
 storyboardctl compile selected v1
 storyboardctl qc list --render-id RENDER_ID
 storyboardctl qc list --compilation-id COMPILATION_ID
+storyboardctl storyboard lock v1
 ```
 
 QC writes JSON reports, contact sheets, cut-boundary sheets, decode results, hashes, black/freeze findings, and audio-level measurements under `review/`, and records successful and failed attempts in SQLite. Discovery commands return the latest report with each render or compilation, while `qc list` returns its full history.
+
+Compilation approval selects the accepted cut but deliberately does not change the storyboard's editability. After the cut is approved, use `storyboard lock` to mark that version final; clone it before making further structural edits.
 
 For a continuity-aware next shot, promote an approved final frame atomically:
 
