@@ -21,6 +21,13 @@ def test_development_environment_is_uv_managed() -> None:
     assert "uv run storyboardctl --help" in readme
     assert "python -m venv" not in readme
     assert "pip install" not in readme
+    assert "```mermaid" in readme
+    assert "STORYBOARDCTL_COMFY_URL" in readme
+    assert "STORYBOARDCTL_COMFY_TOKEN" in readme
+    assert "uv run storyboardctl comfy ping" in readme
+    assert "uv run storyboardctl comfy queue" in readme
+    assert "uv run storyboardctl comfy preflight" in readme
+    assert "ffmpeg" in readme and "ffprobe" in readme
     assert "uv sync" in contributing
     assert "uv build" in contributing
     assert "python -m build" not in contributing

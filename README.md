@@ -1,19 +1,62 @@
 # Storyboard Tools
 
-Storyboard Tools turns a video production into structured, versioned data that humans and agents can change without losing, swapping, or silently overwriting shots.
+[![CI](https://github.com/StephanHeijl/storyboard-tools/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/StephanHeijl/storyboard-tools/actions/workflows/ci.yml)
+[![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Managed by uv](https://img.shields.io/badge/managed%20by-uv-DE5FE9)](https://docs.astral.sh/uv/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-It provides:
+**A durable, agent-facing production layer for turning structured storyboards into reviewed, reproducible video cuts.**
 
-- a typed Python authoring schema designed for LLM structured output;
-- one portable SQLite metadata database per production;
-- immutable shot revisions and cheap storyboard snapshots;
-- reusable image, audio, video, first-frame, and last-frame relationships;
-- collision-proof render attempts with seeds, prompts, workflows, outputs, and reviews;
-- a ComfyUI client and configurable MiniMax H3 workflow adapter;
-- deterministic compilation manifests and full `ffmpeg` assembly;
-- JSON-first CLI commands with stable error codes and no hidden prompts.
+Storyboard Tools keeps shots, revisions, assets, render attempts, approvals, and compilations consistent while ComfyUI and MiniMax H3 do the generation. It is built for humans and agents working on the same production without losing, swapping, or silently overwriting shots.
 
-Large media files remain ordinary project-relative files. SQLite contains paths, hashes, metadata, relationships, and provenance—not binary media or secrets.
+| Production concern | What Storyboard Tools provides |
+|---|---|
+| Storyboards | Typed Pydantic authoring, JSON import, numbered shots, immutable revisions, and cheap version snapshots |
+| Media | Project-relative assets with hashes, roles, music relationships, and first/last-frame continuity |
+| Generation | ComfyUI connectivity, H3 workflow construction, collision-proof attempts, retry, rerender, and recovery |
+| Review | Technical QC, contact sheets, explicit approve/reject history, and selected renders |
+| Delivery | Deterministic manifests, full `ffmpeg` assembly, compilation approval, and selected-cut discovery |
+| Automation | JSON-first commands, stable exit codes, idempotency keys, and no interactive prompts |
+
+Large images, audio, and video remain ordinary project-relative files. One SQLite database per production stores metadata, paths, hashes, relationships, state, and provenance—not binary media or secrets.
+
+## How video creation works
+
+```mermaid
+flowchart TD
+    A["Pydantic or JSON storyboard"] --> B["Import and validate"]
+    B --> C[("SQLite production metadata")]
+    C --> D["Plan immutable render attempt"]
+    D --> E{"ComfyUI / H3 preflight passes?"}
+    E -- "No" --> F["Fix connection, nodes, or models"]
+    F --> E
+    E -- "Yes" --> G["Upload reference and frame assets"]
+    G --> H["Queue H3 workflow"]
+    H --> I["Wait, download, probe, and hash"]
+    I --> J["Technical QC and visual review"]
+    J -- "Reject" --> K["Retry or rerender"]
+    K --> D
+    J -- "Approve" --> L["Select render for shot revision"]
+    L --> M{"All active shots approved?"}
+    M -- "No" --> D
+    M -- "Yes" --> N["Build deterministic compilation"]
+    N --> O["Compilation QC and approval"]
+    O --> P["Selected cut and locked storyboard"]
+    C -. "stores paths and hashes" .-> Q["Project-relative media files"]
+```
+
+Every render and compilation is a new immutable attempt. Rejections preserve history; approvals select an attempt without deleting earlier work.
+
+## Requirements
+
+| Requirement | Purpose |
+|---|---|
+| [uv](https://docs.astral.sh/uv/getting-started/installation/) | Installs Python, creates the managed project environment, and resolves the lockfile |
+| `ffmpeg` and `ffprobe` | Render probing, contact sheets, continuity-frame extraction, QC, and final assembly |
+| ComfyUI-compatible server | Accepts workflow, upload, history, queue, and output-download requests |
+| MiniMax H3 nodes and models | Provides text/image/reference-conditioned video generation |
+
+Run `uv run storyboardctl doctor` after installation to verify the local database tooling, `ffmpeg`, and `ffprobe`.
 
 ## Installation
 
@@ -34,6 +77,50 @@ For a runtime-only environment, omit the development dependency group:
 uv sync --no-dev
 uv run storyboardctl --help
 ```
+
+The examples below use the shorter `storyboardctl …` form for readability. From the repository checkout, prefix it with `uv run`. From another directory, use `uv run --project /path/to/storyboard-tools storyboardctl …`.
+
+## Connect ComfyUI or ComfyStudio
+
+Storyboard Tools talks to the standard ComfyUI HTTP API. If ComfyStudio manages your ComfyUI instance, point Storyboard Tools at the underlying ComfyUI server URL that ComfyStudio exposes. The default is `http://127.0.0.1:8188`.
+
+```bash
+export STORYBOARDCTL_COMFY_URL='http://127.0.0.1:8188'
+# Only needed when your ComfyUI endpoint or reverse proxy requires bearer auth:
+export STORYBOARDCTL_COMFY_TOKEN='your-bearer-token'
+
+uv run storyboardctl comfy ping
+uv run storyboardctl comfy queue
+uv run storyboardctl comfy preflight
+```
+
+- `ping` verifies the server and reports its ComfyUI, Python, and device information.
+- `queue` reports running and pending prompts.
+- `preflight` checks every H3 node and model required by the bundled adapter before any render is submitted.
+
+For a ComfyUI server on another machine, use its LAN or VPN address, for example `http://192.168.1.50:8188`. The machine running Storyboard Tools must be able to reach that address and port. Configure ComfyUI to listen on an appropriate network interface and use a firewall, VPN, authenticated reverse proxy, or equivalent protection—do not expose an unauthenticated ComfyUI API directly to the public internet.
+
+If a reverse proxy sits between the tools and ComfyUI, it must pass `GET /system_stats`, `GET /queue`, `GET /object_info`, `POST /upload/image`, `POST /prompt`, `GET /history/{prompt_id}`, and `GET /view`. Large uploads and video downloads should not be limited to small request or response bodies.
+
+<details>
+<summary>Bundled H3 adapter requirements</summary>
+
+Required H3 nodes:
+
+- `MiniMaxH3ImageToVideo`
+- `MiniMaxH3ReferenceToVideo`
+
+The workflow also uses standard ComfyUI loading, sampling, decoding, video, upload, and save nodes. Required model filenames are:
+
+- `minimax_h3_fl2va_pruned_int8_convrot.safetensors`
+- `minimax_h3_ref2va_pruned_int8_convrot.safetensors`
+- `qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors`
+- `minimax_h3_video_vae_fp16.safetensors`
+- `minimax_h3_audio_vae_fp32.safetensors`
+
+Model names are configurable in Python through `H3Models`. `storyboardctl comfy preflight` is the authoritative check for the active configuration.
+
+</details>
 
 ## Start a production
 
@@ -106,12 +193,7 @@ Stable IDs mean explicit renumbering cannot detach assets, links, renders, or ap
 
 ## Render and review workflow
 
-Connection details are runtime-only:
-
-```bash
-export STORYBOARDCTL_COMFY_URL='http://127.0.0.1:8188'
-export STORYBOARDCTL_COMFY_TOKEN='optional-bearer-token'
-```
+Connection details are runtime-only environment variables and are never written to the production database. See [Connect ComfyUI or ComfyStudio](#connect-comfyui-or-comfystudio).
 
 Queue, wait for, and download a shot through ComfyUI:
 
@@ -149,9 +231,9 @@ If submission fails after planning, the JSON error details include the render ID
 Live ComfyUI checks replace raw REST probes:
 
 ```bash
-storyboardctl comfy ping
-storyboardctl comfy queue
-storyboardctl comfy preflight
+uv run storyboardctl comfy ping
+uv run storyboardctl comfy queue
+uv run storyboardctl comfy preflight
 ```
 
 `preflight` checks the H3 nodes and configured model filenames before a render is submitted. Schema-level negative prompts are converted into explicit `AVOID:` instructions in H3's saved workflow because H3 has no separate negative-conditioning input.
