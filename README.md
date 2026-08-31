@@ -17,22 +17,22 @@ Large media files remain ordinary project-relative files. SQLite contains paths,
 
 ## Installation
 
-Storyboard Tools requires Python 3.11 or newer. Full assembly also requires `ffmpeg` and `ffprobe` on `PATH`.
+Storyboard Tools uses [uv](https://docs.astral.sh/uv/) to manage Python, the project environment, and locked dependencies. Full assembly also requires `ffmpeg` and `ffprobe` on `PATH`.
 
 ```bash
-git clone https://github.com/your-org/storyboard-tools.git
+git clone https://github.com/StephanHeijl/storyboard-tools.git
 cd storyboard-tools
-python -m venv .venv
-. .venv/bin/activate
-python -m pip install -e .
-storyboardctl --help
+uv sync
+uv run storyboardctl --help
 ```
 
-For development:
+`uv sync` creates and maintains the project environment automatically, installs the locked runtime and development dependencies, and uses the Python version in `.python-version`. Run project commands through `uv run`; manual environment activation is unnecessary.
+
+For a runtime-only environment, omit the development dependency group:
 
 ```bash
-python -m pip install -e '.[dev]'
-pytest
+uv sync --no-dev
+uv run storyboardctl --help
 ```
 
 ## Start a production
@@ -42,11 +42,11 @@ Create a directory for the production, generate or write a structured spec, then
 ```bash
 mkdir moonlight-production
 cd moonlight-production
-storyboardctl init
-storyboardctl schema --output project-schema.json
-storyboardctl import spec ../storyboard-tools/examples/moonlight_delivery.json \
+uv run --project ../storyboard-tools storyboardctl init
+uv run --project ../storyboard-tools storyboardctl schema --output project-schema.json
+uv run --project ../storyboard-tools storyboardctl import spec ../storyboard-tools/examples/moonlight_delivery.json \
   --idempotency-key initial-import
-storyboardctl shot list v1
+uv run --project ../storyboard-tools storyboardctl shot list v1
 ```
 
 The bundled [Python example](examples/moonlight_delivery.py) composes the same JSON with Pydantic models. It is intentionally tiny and fictional.

@@ -5,7 +5,7 @@ Contributions are welcome. Keep the agent contract predictable: domain rules bel
 ## Setup
 
 ```bash
-uv sync --extra dev
+uv sync
 ```
 
 Run the complete local gate:
@@ -14,7 +14,7 @@ Run the complete local gate:
 uv run pytest -q
 uv run ruff check .
 uv run mypy src
-uv run python -m build
+uv build
 ```
 
 Integration tests use a fake ComfyUI transport and do not require network access. The ffmpeg integration test skips explicitly when `ffmpeg` is unavailable.
@@ -30,4 +30,3 @@ Integration tests use a fake ComfyUI transport and do not require network access
 - Keep external network and encoding work outside database transactions.
 
 Pull requests should explain any schema migration, state-machine change, or CLI compatibility impact.
-

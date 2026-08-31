@@ -22,9 +22,8 @@ dependencies = [
   "typer>=0.12,<1",
 ]
 
-[project.optional-dependencies]
+[dependency-groups]
 dev = [
-  "build>=1.2",
   "mypy>=1.11",
   "pytest>=8.3",
   "ruff>=0.6",
