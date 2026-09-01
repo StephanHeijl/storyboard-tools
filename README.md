@@ -293,12 +293,15 @@ storyboardctl board render v1                  # fill missing frames for active 
 storyboardctl board build v1                   # animated, subtitled MP4 from completed frames
 storyboardctl board create v1                  # preflight + render missing + build
 storyboardctl board list v1 --position 20
+storyboardctl board reconcile PREVIEW_ID       # finish an interrupted prepared preview publish
 ```
 
 Each image prompt comes from the shot description, with written text explicitly excluded so dialogue does not leak into
 the generated image. Each attempt records its seed, settings, workflow snapshot, output path, hash, and ComfyUI prompt ID.
 The preview selects the newest completed frame for each active shot revision, applies a restrained alternating slide/zoom,
 burns timed dialogue with `ffmpeg`/libass, and records an immutable manifest and output hash. It intentionally has no audio.
+Preview publication records a recoverable prepared state before atomically moving files, so an interrupted finalization can
+be resumed by ID without rebuilding or accepting unverified artifacts.
 
 This creates a second, faster review loop before the full video path:
 

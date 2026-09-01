@@ -11,6 +11,7 @@ from storyboardctl.boarding import BoardRunner
 from storyboardctl.database import Database
 from storyboardctl.errors import Conflict, IntegrityFailure
 from storyboardctl.models import DialogueCueSpec, ProjectSpec, ShotSpec, StoryboardSpec
+from storyboardctl.paths import file_sha256
 from storyboardctl.preview import PreviewBuilder, PreviewSettings, ass_document, ffmpeg_has_subtitles
 from storyboardctl.service import StoryboardService
 
@@ -116,6 +117,32 @@ def test_preview_rejects_tampered_source_before_ffmpeg(tmp_path, monkeypatch) ->
     monkeypatch.setattr("storyboardctl.preview.ffmpeg_has_subtitles", lambda: True)
     with pytest.raises(IntegrityFailure, match="hash mismatch"):
         PreviewBuilder(service).build("v1")
+
+
+def test_prepared_preview_can_be_reconciled_after_interrupted_publish(tmp_path) -> None:
+    service = _service(tmp_path)
+    planned = service.plan_board_frame("v1", 10)
+    frame_output = tmp_path / planned["output_path"]
+    frame_output.parent.mkdir(parents=True, exist_ok=True)
+    frame_output.write_bytes(b"frame")
+    service.transition_board_frame(planned["frame_id"], "submitting")
+    service.transition_board_frame(planned["frame_id"], "queued")
+    service.complete_board_frame(planned["frame_id"])
+    plan = service.plan_board_preview("v1", {"width": 320, "height": 180, "fps": 8})
+    details = service.board_preview_details(plan["preview_id"])
+    output = tmp_path / details["output_path"]
+    manifest = tmp_path / details["manifest_path"]
+    output.parent.mkdir(parents=True, exist_ok=True)
+    staged_output = output.with_name(f".{output.name}.{plan['preview_id']}.part.mp4")
+    staged_manifest = manifest.with_name(f".{manifest.name}.{plan['preview_id']}.part")
+    staged_output.write_bytes(b"video")
+    staged_manifest.write_text('{"storyboard_snapshot": 0}\n', encoding="utf-8")
+    service.prepare_board_preview(plan["preview_id"], digest=file_sha256(staged_output), duration_seconds=3)
+
+    reconciled = PreviewBuilder(service).reconcile(plan["preview_id"])
+    assert reconciled["state"] == "completed"
+    assert output.read_bytes() == b"video"
+    assert manifest.is_file()
 
 
 def test_ass_subtitles_use_exact_dialogue_timing() -> None:

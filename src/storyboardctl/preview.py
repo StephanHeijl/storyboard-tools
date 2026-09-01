@@ -11,7 +11,7 @@ from typing import Any
 from storyboardctl.compiler import probe_duration
 from storyboardctl.errors import Conflict, ExternalServiceFailure, IntegrityFailure
 from storyboardctl.paths import file_sha256, resolve_project_path
-from storyboardctl.service import StoryboardService, _now
+from storyboardctl.service import StoryboardService
 
 
 @dataclass(frozen=True)
@@ -73,6 +73,7 @@ class PreviewBuilder:
         manifest = {
             "preview_id": preview_id,
             "version": version_name,
+            "storyboard_snapshot": plan["snapshot"],
             "settings": settings.__dict__,
             "frames": [
                 {
@@ -92,6 +93,8 @@ class PreviewBuilder:
         }
         staged_output = output.with_name(f".{output.name}.{preview_id}.part.mp4")
         staged_manifest = manifest_path.with_name(f".{manifest_path.name}.{preview_id}.part")
+        published_manifest = False
+        published_output = False
         try:
             output.parent.mkdir(parents=True, exist_ok=True)
             for frame in frames:
@@ -170,26 +173,12 @@ class PreviewBuilder:
                     raise ExternalServiceFailure(f"preview assembly failed: {run.stderr[-1200:]}")
             duration = probe_duration(staged_output)
             digest = file_sha256(staged_output)
-            with self.service.database.transaction(write=True) as connection:
-                row = connection.execute(
-                    "SELECT state,version_id,storyboard_snapshot FROM board_previews WHERE id=?", (preview_id,)
-                ).fetchone()
-                if row is None or row["state"] != "building":
-                    raise Conflict("board preview is no longer building")
-                snapshot = connection.execute(
-                    "SELECT snapshot FROM storyboard_versions WHERE id=?", (row["version_id"],)
-                ).fetchone()[0]
-                if snapshot != row["storyboard_snapshot"]:
-                    raise Conflict("storyboard changed while the rapid preview was building")
-                staged_manifest.replace(manifest_path)
-                staged_output.replace(output)
-                updated = connection.execute(
-                    "UPDATE board_previews SET state='completed',output_sha256=?,duration_seconds=?,"
-                    "completed_at=? WHERE id=? AND state='building'",
-                    (digest, duration, _now(), preview_id),
-                )
-                if updated.rowcount != 1:
-                    raise Conflict("board preview is no longer building")
+            self.service.prepare_board_preview(preview_id, digest=digest, duration_seconds=duration)
+            staged_manifest.replace(manifest_path)
+            published_manifest = True
+            staged_output.replace(output)
+            published_output = True
+            self.service.finalize_board_preview(preview_id, digest=digest, duration_seconds=duration)
             return {
                 "preview_id": preview_id,
                 "state": "completed",
@@ -201,5 +190,38 @@ class PreviewBuilder:
         except Exception as error:
             staged_output.unlink(missing_ok=True)
             staged_manifest.unlink(missing_ok=True)
+            if published_output:
+                output.unlink(missing_ok=True)
+            if published_manifest:
+                manifest_path.unlink(missing_ok=True)
             self.service.fail_board_preview(preview_id, str(error))
             raise
+
+    def reconcile(self, preview_id: str) -> dict[str, Any]:
+        details = self.service.board_preview_details(preview_id)
+        if details["state"] == "completed":
+            return details
+        if details["state"] != "building" or not details["output_sha256"] or not details["duration_seconds"]:
+            raise Conflict("board preview has not reached recoverable publication state")
+        output = resolve_project_path(self.service.project_root, details["output_path"])
+        manifest = resolve_project_path(self.service.project_root, details["manifest_path"])
+        staged_output = output.with_name(f".{output.name}.{preview_id}.part.mp4")
+        staged_manifest = manifest.with_name(f".{manifest.name}.{preview_id}.part")
+        if not manifest.is_file() and staged_manifest.is_file():
+            staged_manifest.replace(manifest)
+        if not output.is_file() and staged_output.is_file():
+            staged_output.replace(output)
+        if not manifest.is_file() or not output.is_file():
+            raise Conflict("prepared preview artifacts are incomplete")
+        actual = file_sha256(output)
+        if actual != details["output_sha256"]:
+            raise IntegrityFailure(
+                "prepared preview output hash mismatch",
+                details={"expected": details["output_sha256"], "actual": actual},
+            )
+        self.service.finalize_board_preview(
+            preview_id,
+            digest=actual,
+            duration_seconds=float(details["duration_seconds"]),
+        )
+        return self.service.board_preview_details(preview_id)

@@ -297,6 +297,11 @@ def board_create(
     _execute(context, operation)
 
 
+@board_app.command("reconcile")
+def board_reconcile(context: typer.Context, preview_id: str) -> None:
+    _execute(context, lambda: PreviewBuilder(_service(context)).reconcile(preview_id))
+
+
 @import_app.command("spec")
 def import_spec(
     context: typer.Context,

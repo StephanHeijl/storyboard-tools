@@ -598,6 +598,8 @@ class StoryboardService:
             row = connection.execute("SELECT * FROM board_previews WHERE id=?", (preview_id,)).fetchone()
             if row is None:
                 raise NotFound(f"board preview not found: {preview_id}")
+            if row["output_sha256"] != digest or row["duration_seconds"] != duration_seconds:
+                raise Conflict("board preview publication has not been prepared with these artifacts")
             current_snapshot = connection.execute(
                 "SELECT snapshot FROM storyboard_versions WHERE id=?", (row["version_id"],)
             ).fetchone()[0]
@@ -610,6 +612,34 @@ class StoryboardService:
             )
             if updated.rowcount != 1:
                 raise Conflict("board preview is no longer building")
+
+    def prepare_board_preview(self, preview_id: str, *, digest: str, duration_seconds: float) -> dict[str, Any]:
+        with self.database.transaction(write=True) as connection:
+            row = connection.execute("SELECT * FROM board_previews WHERE id=?", (preview_id,)).fetchone()
+            if row is None:
+                raise NotFound(f"board preview not found: {preview_id}")
+            if row["state"] != "building":
+                raise Conflict("board preview is no longer building")
+            current_snapshot = connection.execute(
+                "SELECT snapshot FROM storyboard_versions WHERE id=?", (row["version_id"],)
+            ).fetchone()[0]
+            if current_snapshot != row["storyboard_snapshot"]:
+                raise Conflict("storyboard changed while the rapid preview was building")
+            connection.execute(
+                "UPDATE board_previews SET output_sha256=?,duration_seconds=? WHERE id=?",
+                (digest, duration_seconds, preview_id),
+            )
+            return dict(row)
+
+    def board_preview_details(self, preview_id: str) -> dict[str, Any]:
+        with self.database.connect() as connection:
+            row = connection.execute("SELECT * FROM board_previews WHERE id=?", (preview_id,)).fetchone()
+        if row is None:
+            raise NotFound(f"board preview not found: {preview_id}")
+        result = dict(row)
+        result["preview_id"] = result.pop("id")
+        result["settings"] = json.loads(result.pop("settings_json"))
+        return result
 
     def fail_board_preview(self, preview_id: str, error: str) -> None:
         with self.database.transaction(write=True) as connection:
