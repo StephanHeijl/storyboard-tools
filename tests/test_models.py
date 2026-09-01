@@ -126,6 +126,31 @@ def test_dialogue_cue_rejects_invalid_speaker_id_and_empty_text() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "second_speaker,second_id",
+    [("Bob", "S1"), ("Alice", "S2")],
+)
+def test_dialogue_speaker_identity_is_one_to_one(second_speaker: str, second_id: str) -> None:
+    with pytest.raises(ValidationError, match="exactly one"):
+        ShotSpec(
+            key="identity",
+            title="Identity",
+            description="A conversation.",
+            prompt="Two-shot.",
+            duration_seconds=3,
+            dialogue=[
+                DialogueCueSpec(speaker="Alice", speaker_id="S1", text="One", start_seconds=0, end_seconds=1),
+                DialogueCueSpec(
+                    speaker=second_speaker,
+                    speaker_id=second_id,
+                    text="Two",
+                    start_seconds=1,
+                    end_seconds=2,
+                ),
+            ],
+        )
+
+
 def test_models_reject_unknown_fields_and_invalid_values() -> None:
     with pytest.raises(ValidationError):
         ShotSpec(

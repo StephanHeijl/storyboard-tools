@@ -5,8 +5,11 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from storyboardctl.boarding import BoardRunner
 from storyboardctl.database import Database
+from storyboardctl.errors import Conflict, IntegrityFailure
 from storyboardctl.models import DialogueCueSpec, ProjectSpec, ShotSpec, StoryboardSpec
 from storyboardctl.preview import PreviewBuilder, PreviewSettings, ass_document, ffmpeg_has_subtitles
 from storyboardctl.service import StoryboardService
@@ -69,6 +72,50 @@ def test_board_frame_is_versioned_and_runner_persists_provenance(tmp_path) -> No
     assert completed["output_sha256"]
     assert service.latest_board_frames("v1")[0]["frame_id"] == planned["frame_id"]
     assert service.plan_board_frame("v1", 10)["attempt_number"] == 2
+
+
+def test_board_frame_completion_is_state_checked_and_idempotent(tmp_path) -> None:
+    service = _service(tmp_path)
+    planned = service.plan_board_frame("v1", 10)
+    output = tmp_path / planned["output_path"]
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_bytes(b"png")
+    with pytest.raises(Conflict, match="planned"):
+        service.complete_board_frame(planned["frame_id"])
+    service.transition_board_frame(planned["frame_id"], "submitting")
+    service.transition_board_frame(planned["frame_id"], "queued")
+    first = service.complete_board_frame(planned["frame_id"])
+    second = service.complete_board_frame(planned["frame_id"])
+    assert second["output_sha256"] == first["output_sha256"]
+
+
+def test_cloned_version_does_not_reuse_another_versions_board_attempt(tmp_path) -> None:
+    service = _service(tmp_path)
+    planned = service.plan_board_frame("v1", 10)
+    output = tmp_path / planned["output_path"]
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_bytes(b"png")
+    service.transition_board_frame(planned["frame_id"], "submitting")
+    service.transition_board_frame(planned["frame_id"], "queued")
+    service.complete_board_frame(planned["frame_id"])
+    service.clone_storyboard("v1", "v2")
+    with pytest.raises(Conflict, match="no completed rapid-board frame"):
+        service.plan_board_preview("v2", {})
+
+
+def test_preview_rejects_tampered_source_before_ffmpeg(tmp_path, monkeypatch) -> None:
+    service = _service(tmp_path)
+    planned = service.plan_board_frame("v1", 10)
+    output = tmp_path / planned["output_path"]
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_bytes(b"original")
+    service.transition_board_frame(planned["frame_id"], "submitting")
+    service.transition_board_frame(planned["frame_id"], "queued")
+    service.complete_board_frame(planned["frame_id"])
+    output.write_bytes(b"tampered")
+    monkeypatch.setattr("storyboardctl.preview.ffmpeg_has_subtitles", lambda: True)
+    with pytest.raises(IntegrityFailure, match="hash mismatch"):
+        PreviewBuilder(service).build("v1")
 
 
 def test_ass_subtitles_use_exact_dialogue_timing() -> None:

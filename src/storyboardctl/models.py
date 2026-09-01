@@ -133,12 +133,18 @@ class ShotSpec(StrictModel):
         if len(identities) != len(set(identities)):
             raise ValueError("shot asset role/order pairs must be unique")
         previous_end = 0.0
+        speakers_by_id: dict[str, str] = {}
+        ids_by_speaker: dict[str, str] = {}
         for cue in self.dialogue:
             if cue.end_seconds > self.duration_seconds:
                 raise ValueError("dialogue cue must end within the shot duration")
             if cue.start_seconds < previous_end:
                 raise ValueError("dialogue cues cannot overlap and must be chronological")
             previous_end = cue.end_seconds
+            if speakers_by_id.setdefault(cue.speaker_id, cue.speaker) != cue.speaker:
+                raise ValueError("a dialogue speaker ID must identify exactly one speaker per shot")
+            if ids_by_speaker.setdefault(cue.speaker, cue.speaker_id) != cue.speaker_id:
+                raise ValueError("a dialogue speaker must use exactly one speaker ID per shot")
         return self
 
 

@@ -503,11 +503,18 @@ class StoryboardService:
     def complete_board_frame(self, frame_id: str) -> dict[str, Any]:
         details = self.board_frame_details(frame_id)
         output = resolve_project_path(self.project_root, details["output_path"], must_exist=True)
+        digest = file_sha256(output)
         with self.database.transaction(write=True) as connection:
-            connection.execute(
-                "UPDATE board_frames SET state='completed', output_sha256=?, completed_at=? WHERE id=?",
-                (file_sha256(output), _now(), frame_id),
+            current = self.board_frame_details(frame_id, connection=connection)
+            if current["state"] == "completed" and current["output_sha256"] == digest:
+                return current
+            updated = connection.execute(
+                "UPDATE board_frames SET state='completed', output_sha256=?, completed_at=? "
+                "WHERE id=? AND state IN ('queued','running')",
+                (digest, _now(), frame_id),
             )
+            if updated.rowcount != 1:
+                raise Conflict(f"board frame cannot be completed from state: {current['state']}")
         return self.board_frame_details(frame_id)
 
     def list_board_frames(self, version_name: str, *, position: int | None = None) -> list[dict[str, Any]]:
@@ -526,16 +533,90 @@ class StoryboardService:
         shots = self.list_shots(version_name)
         result: list[dict[str, Any]] = []
         with self.database.connect() as connection:
+            version = self._version(connection, version_name)
             for shot in shots:
                 row = connection.execute(
-                    "SELECT id FROM board_frames WHERE revision_id=? AND state='completed' "
+                    "SELECT id FROM board_frames WHERE version_id=? AND revision_id=? AND state='completed' "
                     "ORDER BY attempt_number DESC LIMIT 1",
-                    (shot["revision_id"],),
+                    (version["id"], shot["revision_id"]),
                 ).fetchone()
                 if row is None:
                     raise Conflict(f"shot {shot['position']} has no completed rapid-board frame")
                 result.append(self.board_frame_details(row[0], connection=connection))
         return result
+
+    def plan_board_preview(self, version_name: str, settings: dict[str, Any]) -> dict[str, Any]:
+        with self.database.transaction(write=True) as connection:
+            version = self._version(connection, version_name)
+            shots = connection.execute(
+                "SELECT vs.position, vs.revision_id FROM version_shots vs "
+                "WHERE vs.version_id=? AND vs.archived_at IS NULL ORDER BY vs.position",
+                (version["id"],),
+            ).fetchall()
+            frames: list[dict[str, Any]] = []
+            for shot in shots:
+                row = connection.execute(
+                    "SELECT id FROM board_frames WHERE version_id=? AND revision_id=? AND state='completed' "
+                    "ORDER BY attempt_number DESC LIMIT 1",
+                    (version["id"], shot["revision_id"]),
+                ).fetchone()
+                if row is None:
+                    raise Conflict(f"shot {shot['position']} has no completed rapid-board frame")
+                frames.append(self.board_frame_details(row["id"], connection=connection))
+            number = int(
+                connection.execute(
+                    "SELECT COALESCE(MAX(preview_number),0)+1 FROM board_previews WHERE version_id=?",
+                    (version["id"],),
+                ).fetchone()[0]
+            )
+            preview_id = _id()
+            base = f"boards/{version_name}/previews/preview-{number:03d}"
+            connection.execute(
+                "INSERT INTO board_previews(id,version_id,preview_number,storyboard_snapshot,state,"
+                "settings_json,manifest_path,output_path,created_at) VALUES (?,?,?,?, 'building',?,?,?,?)",
+                (
+                    preview_id,
+                    version["id"],
+                    number,
+                    version["snapshot"],
+                    _json(settings),
+                    f"{base}.json",
+                    f"{base}.mp4",
+                    _now(),
+                ),
+            )
+            return {
+                "preview_id": preview_id,
+                "version_id": version["id"],
+                "snapshot": version["snapshot"],
+                "base": base,
+                "frames": frames,
+            }
+
+    def finalize_board_preview(self, preview_id: str, *, digest: str, duration_seconds: float) -> None:
+        with self.database.transaction(write=True) as connection:
+            row = connection.execute("SELECT * FROM board_previews WHERE id=?", (preview_id,)).fetchone()
+            if row is None:
+                raise NotFound(f"board preview not found: {preview_id}")
+            current_snapshot = connection.execute(
+                "SELECT snapshot FROM storyboard_versions WHERE id=?", (row["version_id"],)
+            ).fetchone()[0]
+            if current_snapshot != row["storyboard_snapshot"]:
+                raise Conflict("storyboard changed while the rapid preview was building")
+            updated = connection.execute(
+                "UPDATE board_previews SET state='completed',output_sha256=?,duration_seconds=?,completed_at=? "
+                "WHERE id=? AND state='building'",
+                (digest, duration_seconds, _now(), preview_id),
+            )
+            if updated.rowcount != 1:
+                raise Conflict("board preview is no longer building")
+
+    def fail_board_preview(self, preview_id: str, error: str) -> None:
+        with self.database.transaction(write=True) as connection:
+            connection.execute(
+                "UPDATE board_previews SET state='failed',error_message=? WHERE id=? AND state='building'",
+                (error, preview_id),
+            )
 
     def list_quality_reports(
         self,

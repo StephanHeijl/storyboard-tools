@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tempfile
-import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from storyboardctl.errors import ExternalServiceFailure
+from storyboardctl.compiler import probe_duration
+from storyboardctl.errors import Conflict, ExternalServiceFailure, IntegrityFailure
 from storyboardctl.paths import file_sha256, resolve_project_path
-from storyboardctl.service import StoryboardService, _json, _now
+from storyboardctl.service import StoryboardService, _now
 
 
 @dataclass(frozen=True)
@@ -63,34 +64,12 @@ class PreviewBuilder:
             raise ExternalServiceFailure(
                 "ffmpeg lacks the subtitles filter; install an ffmpeg build with libass support"
             )
-        frames = self.service.latest_board_frames(version_name)
-        with self.service.database.transaction(write=True) as connection:
-            version = self.service._version(connection, version_name)
-            number = int(
-                connection.execute(
-                    "SELECT COALESCE(MAX(preview_number),0)+1 FROM board_previews WHERE version_id=?", (version["id"],)
-                ).fetchone()[0]
-            )
-            preview_id = str(uuid.uuid4())
-            base = f"boards/{version_name}/previews/preview-{number:03d}"
-            connection.execute(
-                "INSERT INTO board_previews(id,version_id,preview_number,storyboard_snapshot,state,"
-                "settings_json,manifest_path,output_path,created_at) "
-                "VALUES (?,?,?,?, 'building',?,?,?,?)",
-                (
-                    preview_id,
-                    version["id"],
-                    number,
-                    version["snapshot"],
-                    _json(settings.__dict__),
-                    f"{base}.json",
-                    f"{base}.mp4",
-                    _now(),
-                ),
-            )
+        plan = self.service.plan_board_preview(version_name, settings.__dict__)
+        frames = plan["frames"]
+        preview_id = plan["preview_id"]
+        base = plan["base"]
         output = resolve_project_path(self.service.project_root, f"{base}.mp4")
         manifest_path = resolve_project_path(self.service.project_root, f"{base}.json")
-        output.parent.mkdir(parents=True, exist_ok=True)
         manifest = {
             "preview_id": preview_id,
             "version": version_name,
@@ -111,8 +90,22 @@ class PreviewBuilder:
                 for frame in frames
             ],
         }
-        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        staged_output = output.with_name(f".{output.name}.{preview_id}.part.mp4")
+        staged_manifest = manifest_path.with_name(f".{manifest_path.name}.{preview_id}.part")
         try:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            for frame in frames:
+                source = resolve_project_path(self.service.project_root, frame["output_path"], must_exist=True)
+                actual = file_sha256(source)
+                if actual != frame["output_sha256"]:
+                    raise IntegrityFailure(
+                        f"rapid-board frame hash mismatch at position {frame['position_snapshot']}",
+                        details={"expected": frame["output_sha256"], "actual": actual},
+                    )
+            with staged_manifest.open("w", encoding="utf-8") as stream:
+                stream.write(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+                stream.flush()
+                os.fsync(stream.fileno())
             with tempfile.TemporaryDirectory(prefix="storyboardctl-preview-") as temp_name:
                 temp = Path(temp_name)
                 segments: list[Path] = []
@@ -157,20 +150,46 @@ class PreviewBuilder:
                 concat = temp / "concat.txt"
                 concat.write_text("".join(f"file '{p}'\n" for p in segments), encoding="utf-8")
                 run = subprocess.run(
-                    ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat), "-c", "copy", str(output)],
+                    [
+                        "ffmpeg",
+                        "-y",
+                        "-f",
+                        "concat",
+                        "-safe",
+                        "0",
+                        "-i",
+                        str(concat),
+                        "-c",
+                        "copy",
+                        str(staged_output),
+                    ],
                     capture_output=True,
                     text=True,
                 )
                 if run.returncode != 0:
                     raise ExternalServiceFailure(f"preview assembly failed: {run.stderr[-1200:]}")
-            duration = sum(float(frame["duration_seconds"]) for frame in frames)
-            digest = file_sha256(output)
+            duration = probe_duration(staged_output)
+            digest = file_sha256(staged_output)
             with self.service.database.transaction(write=True) as connection:
-                connection.execute(
+                row = connection.execute(
+                    "SELECT state,version_id,storyboard_snapshot FROM board_previews WHERE id=?", (preview_id,)
+                ).fetchone()
+                if row is None or row["state"] != "building":
+                    raise Conflict("board preview is no longer building")
+                snapshot = connection.execute(
+                    "SELECT snapshot FROM storyboard_versions WHERE id=?", (row["version_id"],)
+                ).fetchone()[0]
+                if snapshot != row["storyboard_snapshot"]:
+                    raise Conflict("storyboard changed while the rapid preview was building")
+                staged_manifest.replace(manifest_path)
+                staged_output.replace(output)
+                updated = connection.execute(
                     "UPDATE board_previews SET state='completed',output_sha256=?,duration_seconds=?,"
-                    "completed_at=? WHERE id=?",
+                    "completed_at=? WHERE id=? AND state='building'",
                     (digest, duration, _now(), preview_id),
                 )
+                if updated.rowcount != 1:
+                    raise Conflict("board preview is no longer building")
             return {
                 "preview_id": preview_id,
                 "state": "completed",
@@ -180,8 +199,7 @@ class PreviewBuilder:
                 "duration_seconds": duration,
             }
         except Exception as error:
-            with self.service.database.transaction(write=True) as connection:
-                connection.execute(
-                    "UPDATE board_previews SET state='failed',error_message=? WHERE id=?", (str(error), preview_id)
-                )
+            staged_output.unlink(missing_ok=True)
+            staged_manifest.unlink(missing_ok=True)
+            self.service.fail_board_preview(preview_id, str(error))
             raise
