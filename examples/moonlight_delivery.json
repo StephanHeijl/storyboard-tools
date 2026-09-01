@@ -21,7 +21,8 @@
         "assets": [],
         "links": [],
         "music": {"theme": "starts_here"},
-        "notes": []
+        "notes": [],
+        "dialogue": []
       },
       {
         "key": "landing",
@@ -43,7 +44,8 @@
           {"target_shot_key": "approach", "kind": "continuity", "notes": null}
         ],
         "music": {"theme": "continues"},
-        "notes": []
+        "notes": [],
+        "dialogue": []
       },
       {
         "key": "delivery",
@@ -64,7 +66,8 @@
           {"target_shot_key": "landing", "kind": "continuity", "notes": null}
         ],
         "music": {"theme": "associated"},
-        "notes": []
+        "notes": [],
+        "dialogue": []
       }
     ],
     "description": "A three-shot example with references, continuity, and music metadata."

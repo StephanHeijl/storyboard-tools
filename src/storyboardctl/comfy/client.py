@@ -13,6 +13,7 @@ import httpx
 from storyboardctl.errors import ExternalServiceFailure
 
 VIDEO_EXTENSIONS = (".mp4", ".webm", ".mov", ".mkv")
+IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp")
 
 
 def _all_strings(value: Any) -> set[str]:
@@ -58,6 +59,27 @@ def discover_video_output(value: Any) -> dict[str, Any]:
     if not matches:
         raise ExternalServiceFailure("ComfyUI completed without a video output")
     return matches[0]
+
+
+def discover_image_output(value: Any) -> dict[str, Any]:
+    matches = _media_outputs(value, IMAGE_EXTENSIONS)
+    if not matches:
+        raise ExternalServiceFailure("ComfyUI completed without an image output")
+    return matches[0]
+
+
+def _media_outputs(value: Any, extensions: tuple[str, ...]) -> list[dict[str, Any]]:
+    matches: list[dict[str, Any]] = []
+    if isinstance(value, dict):
+        filename = value.get("filename")
+        if isinstance(filename, str) and filename.lower().endswith(extensions):
+            matches.append(value)
+        for child in value.values():
+            matches.extend(_media_outputs(child, extensions))
+    elif isinstance(value, list):
+        for child in value:
+            matches.extend(_media_outputs(child, extensions))
+    return matches
 
 
 class ComfyClient:
@@ -178,6 +200,13 @@ class ComfyClient:
 
     def download(self, history_entry: dict[str, Any], destination: Path) -> Path:
         item = discover_video_output(history_entry.get("outputs", {}))
+        return self._download_item(item, destination)
+
+    def download_image(self, history_entry: dict[str, Any], destination: Path) -> Path:
+        item = discover_image_output(history_entry.get("outputs", {}))
+        return self._download_item(item, destination)
+
+    def _download_item(self, item: dict[str, Any], destination: Path) -> Path:
         destination.parent.mkdir(parents=True, exist_ok=True)
         staged = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.part")
         url = f"{self.settings.base_url.rstrip('/')}/view"

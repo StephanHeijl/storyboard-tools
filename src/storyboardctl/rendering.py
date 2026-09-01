@@ -10,7 +10,7 @@ from typing import Any, Protocol, cast
 from storyboardctl.comfy.adapters import WorkflowAdapter, WorkflowContext
 from storyboardctl.compiler import probe_duration
 from storyboardctl.errors import Conflict, ExternalServiceFailure, NotFound, StoryboardError
-from storyboardctl.models import RenderMode
+from storyboardctl.models import DialogueCueSpec, RenderMode
 from storyboardctl.paths import resolve_project_path
 from storyboardctl.service import StoryboardService
 
@@ -105,6 +105,7 @@ class RenderRunner:
                 reference_images=tuple(references),
                 first_frame=first_frame,
                 last_frame=last_frame,
+                dialogue=tuple(DialogueCueSpec.model_validate(cue) for cue in details["dialogue"]),
             )
             workflow = self._workflow_for(details, adapter, context)
             snapshot = adapter.scrub_workflow(workflow)

@@ -37,9 +37,7 @@ def compile_h3_prompt(
     cues = _dialogue_lines(dialogue)
     if "integrated_multimodal_description:" in prompt:
         markers = [
-            index
-            for marker in ("overall_soundscape:", "non_diegetic_music:")
-            if (index := prompt.find(marker)) >= 0
+            index for marker in ("overall_soundscape:", "non_diegetic_music:") if (index := prompt.find(marker)) >= 0
         ]
         insert_at = min(markers) if markers else len(prompt)
         effective = f"{prompt[:insert_at].rstrip()}\n{cues}\n\n{prompt[insert_at:].lstrip()}".rstrip()
