@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from storyboardctl.errors import Conflict, NotFound
-from storyboardctl.models import RenderMode
+from storyboardctl.models import DialogueCueSpec, RenderMode
 
 
 @dataclass(frozen=True)
@@ -21,6 +21,7 @@ class WorkflowContext:
     reference_images: tuple[str, ...] = ()
     first_frame: str | None = None
     last_frame: str | None = None
+    dialogue: tuple[DialogueCueSpec, ...] = ()
 
 
 class WorkflowAdapter(Protocol):
