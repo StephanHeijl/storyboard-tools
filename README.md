@@ -135,6 +135,14 @@ Rapid visual storyboarding uses the official ComfyUI Z-Image Turbo graph with th
 Install them in the corresponding ComfyUI model directories, then run `storyboardctl board preflight`. The tool never
 downloads multi-gigabyte models automatically. The preflight reports missing nodes and filenames before a job is queued.
 
+Alternative official model variants can be selected without renaming files:
+
+```bash
+export STORYBOARDCTL_ZIMAGE_MODEL='z_image_turbo_bf16.safetensors'
+export STORYBOARDCTL_ZIMAGE_TEXT_ENCODER='qwen_3_4b.safetensors'
+export STORYBOARDCTL_ZIMAGE_VAE='ae.safetensors'
+```
+
 </details>
 
 ## Start a production

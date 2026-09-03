@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from storyboardctl.comfy.zimage import ZImageContext, ZImageTurboAdapter
+from storyboardctl.comfy.zimage import ZImageContext, ZImageModels, ZImageTurboAdapter
 
 
 def test_zimage_workflow_matches_turbo_defaults() -> None:
@@ -19,3 +19,13 @@ def test_zimage_workflow_matches_turbo_defaults() -> None:
         "qwen_3_4b_fp8_mixed.safetensors",
         "ae.safetensors",
     }
+
+
+def test_zimage_model_names_can_come_from_environment(monkeypatch) -> None:
+    monkeypatch.setenv("STORYBOARDCTL_ZIMAGE_MODEL", "z_image_turbo_bf16.safetensors")
+    monkeypatch.setenv("STORYBOARDCTL_ZIMAGE_TEXT_ENCODER", "qwen_3_4b.safetensors")
+    adapter = ZImageTurboAdapter()
+    assert adapter.models == ZImageModels(
+        diffusion_model="z_image_turbo_bf16.safetensors",
+        text_encoder="qwen_3_4b.safetensors",
+    )

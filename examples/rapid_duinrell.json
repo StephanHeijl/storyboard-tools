@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "slug": "rapid-duinrell",
+  "title": "A Day at Duinrell",
+  "storyboard": {
+    "name": "v1",
+    "title": "Five-Scene Rapid Board",
+    "description": "A compact anime-style test of the rapid visual storyboarding workflow.",
+    "shots": [
+      {
+        "key": "arrival",
+        "position": 10,
+        "title": "Arrival",
+        "description": "Bright cinematic anime illustration, wide establishing view of Duinrell amusement park in the Netherlands on a clear summer morning. Two teenage friends stand at the entrance: Noor has short black hair, a yellow rain jacket and blue backpack; Finn has curly auburn hair, a teal hoodie and red sneakers. Roller coasters rise beyond pine trees, cheerful adventurous mood, consistent character design.",
+        "prompt": "Wide animated arrival shot at Duinrell.",
+        "duration_seconds": 3.5,
+        "dialogue": [{"speaker":"Noor","speaker_id":"S1","text":"Ready for the wildest day ever?","language":"English","start_seconds":0.5,"end_seconds":2.8}]
+      },
+      {
+        "key": "coaster",
+        "position": 20,
+        "title": "First Drop",
+        "description": "Dynamic cinematic anime illustration of Noor, short black hair and yellow rain jacket, and Finn, curly auburn hair and teal hoodie, seated together in the front car of a looping roller coaster at Duinrell. The car tips over a huge first drop, wind and speed, delighted expressions, Dutch pine forest far below, no motion blur over faces, consistent character design.",
+        "prompt": "Roller-coaster first drop with two friends.",
+        "duration_seconds": 3.0,
+        "dialogue": [{"speaker":"Finn","speaker_id":"S1","text":"I changed my mind!","language":"English","start_seconds":0.8,"end_seconds":2.2}]
+      },
+      {
+        "key": "splash",
+        "position": 30,
+        "title": "Splash",
+        "description": "Energetic cinematic anime illustration at Duinrell's water ride. A giant sparkling splash surrounds Noor in a yellow rain jacket and Finn in a teal hoodie as their log boat lands, both laughing, droplets frozen in sunlight, colorful ride scenery and pine trees, consistent faces and clothing.",
+        "prompt": "Water-ride splash in bright sunlight.",
+        "duration_seconds": 3.0,
+        "dialogue": [{"speaker":"Noor","speaker_id":"S1","text":"Your hoodie is completely soaked!","language":"English","start_seconds":0.7,"end_seconds":2.5}]
+      },
+      {
+        "key": "quiet-wheel",
+        "position": 40,
+        "title": "Above the Park",
+        "description": "Warm cinematic anime illustration inside a Ferris wheel gondola at golden hour above Duinrell. Noor, short black hair and yellow rain jacket, and Finn, curly auburn hair and teal hoodie, look through the window at roller coasters, water slides and Dutch forest glowing below. Calm friendship beat, soft sunset rim light, consistent character design.",
+        "prompt": "Quiet golden-hour Ferris wheel moment.",
+        "duration_seconds": 4.0,
+        "dialogue": [{"speaker":"Finn","speaker_id":"S1","text":"Okay... this part I could do all day.","language":"English","start_seconds":1.0,"end_seconds":3.4}]
+      },
+      {
+        "key": "goodbye",
+        "position": 50,
+        "title": "One More Ride",
+        "description": "Cinematic anime illustration at blue hour outside Duinrell's illuminated entrance. Noor in her yellow rain jacket and Finn in his teal hoodie walk toward the viewer with tired happy smiles, park lights and a roller coaster glowing behind them, evening sky, nostalgic finale, consistent character design.",
+        "prompt": "Friends leave the illuminated park at blue hour.",
+        "duration_seconds": 3.5,
+        "dialogue": [{"speaker":"Noor","speaker_id":"S1","text":"Same time tomorrow?","language":"English","start_seconds":0.8,"end_seconds":2.4}]
+      }
+    ]
+  },
+  "assets": [],
+  "music": [],
+  "metadata": {"purpose":"rapid-storyboard-live-test"}
+}
