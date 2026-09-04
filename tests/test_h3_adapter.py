@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from storyboardctl.comfy.adapters import AdapterRegistry, WorkflowContext
 from storyboardctl.comfy.h3 import H3Adapter, H3Models
-from storyboardctl.models import RenderMode
+from storyboardctl.models import DialogueCueSpec, RenderMode
 
 
 def test_registry_and_h3_reference_workflow_use_structured_context() -> None:
@@ -107,3 +107,53 @@ def test_h3_adapter_translates_negative_prompt_into_explicit_instructions() -> N
     effective = workflow["5"]["inputs"]["prompt"]
     assert effective.startswith("One small robot walks through a meadow.")
     assert "AVOID: text, duplicate robot, flicker" in effective
+
+
+def test_h3_adapter_compiles_structured_dialogue_into_native_prompt_notation() -> None:
+    workflow = H3Adapter().build_workflow(
+        WorkflowContext(
+            prompt="Medium shot of Alice waiting beside the gate.",
+            negative_prompt="unrequested speech, captions",
+            render_mode=RenderMode.text_to_video,
+            width=736,
+            height=416,
+            frames=107,
+            steps=8,
+            seed=1,
+            output_key="dialogue-test",
+            dialogue=(
+                DialogueCueSpec(
+                    speaker="Alice",
+                    speaker_id="S1",
+                    text="We need to leave before sunset.",
+                    language="English",
+                    start_seconds=1.2,
+                    end_seconds=3.4,
+                ),
+            ),
+        )
+    )
+
+    effective = workflow["5"]["inputs"]["prompt"]
+    assert effective.startswith("integrated_multimodal_description: [Shot 1]")
+    assert "At 00:01.200, Alice (S1) says: <d>[English] We need to leave before sunset.</d>" in effective
+    assert "The dialogue ends by 00:03.400" in effective
+    assert "overall_soundscape:" in effective
+    assert "non_diegetic_music: N/A" in effective
+    assert "AVOID: unrequested speech, captions" in effective
+
+
+def test_h3_adapter_leaves_prompt_without_dialogue_backward_compatible() -> None:
+    workflow = H3Adapter().build_workflow(
+        WorkflowContext(
+            prompt="A silent meadow.",
+            render_mode=RenderMode.text_to_video,
+            width=736,
+            height=416,
+            frames=107,
+            steps=8,
+            seed=1,
+            output_key="silent-test",
+        )
+    )
+    assert workflow["5"]["inputs"]["prompt"] == "A silent meadow."

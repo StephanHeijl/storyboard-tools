@@ -23,7 +23,7 @@ def test_initialize_is_idempotent_and_enables_safety_pragmas(tmp_path) -> None:
             row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
         }
 
-    assert [row[0] for row in migrations] == [1, 2, 3]
+    assert [row[0] for row in migrations] == [1, 2, 3, 4]
     for required in (
         "production",
         "storyboard_versions",
@@ -39,6 +39,8 @@ def test_initialize_is_idempotent_and_enables_safety_pragmas(tmp_path) -> None:
         "compilation_reviews",
         "approved_compilations",
         "render_finalization_claims",
+        "board_frames",
+        "board_previews",
         "events",
     ):
         assert required in tables

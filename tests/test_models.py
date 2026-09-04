@@ -7,6 +7,7 @@ from storyboardctl.models import (
     AssetKind,
     AssetRole,
     AssetSpec,
+    DialogueCueSpec,
     MusicCueSpec,
     MusicRelationship,
     ProjectSpec,
@@ -65,6 +66,89 @@ def test_project_schema_round_trips_strict_json() -> None:
     assert restored == project
     assert restored.storyboard.shots[1].position is None
     assert restored.storyboard.shots[0].assets[1].role is AssetRole.first_frame
+
+
+def test_dialogue_cues_round_trip_and_must_fit_without_overlap() -> None:
+    shot = ShotSpec(
+        key="dialogue",
+        title="Dialogue",
+        description="Two people speak.",
+        prompt="Medium two-shot.",
+        duration_seconds=4,
+        dialogue=[
+            DialogueCueSpec(
+                speaker="Alice",
+                speaker_id="S1",
+                text="We need to leave.",
+                language="English",
+                start_seconds=0.5,
+                end_seconds=1.8,
+            ),
+            DialogueCueSpec(
+                speaker="Bob",
+                speaker_id="S2",
+                text="I know.",
+                language="English",
+                start_seconds=2,
+                end_seconds=3,
+            ),
+        ],
+    )
+    assert ShotSpec.model_validate_json(shot.model_dump_json()) == shot
+
+    payload = shot.model_dump(mode="json")
+    payload["dialogue"][1]["start_seconds"] = 1.5
+    with pytest.raises(ValidationError, match="overlap"):
+        ShotSpec.model_validate(payload)
+
+    payload = shot.model_dump(mode="json")
+    payload["dialogue"][1]["end_seconds"] = 5
+    with pytest.raises(ValidationError, match="duration"):
+        ShotSpec.model_validate(payload)
+
+
+def test_dialogue_cue_rejects_invalid_speaker_id_and_empty_text() -> None:
+    with pytest.raises(ValidationError, match="speaker_id"):
+        DialogueCueSpec(
+            speaker="Alice",
+            speaker_id="Alice",
+            text="Hello",
+            start_seconds=0,
+            end_seconds=1,
+        )
+    with pytest.raises(ValidationError):
+        DialogueCueSpec(
+            speaker="Alice",
+            speaker_id="S1",
+            text="",
+            start_seconds=0,
+            end_seconds=1,
+        )
+
+
+@pytest.mark.parametrize(
+    "second_speaker,second_id",
+    [("Bob", "S1"), ("Alice", "S2")],
+)
+def test_dialogue_speaker_identity_is_one_to_one(second_speaker: str, second_id: str) -> None:
+    with pytest.raises(ValidationError, match="exactly one"):
+        ShotSpec(
+            key="identity",
+            title="Identity",
+            description="A conversation.",
+            prompt="Two-shot.",
+            duration_seconds=3,
+            dialogue=[
+                DialogueCueSpec(speaker="Alice", speaker_id="S1", text="One", start_seconds=0, end_seconds=1),
+                DialogueCueSpec(
+                    speaker=second_speaker,
+                    speaker_id=second_id,
+                    text="Two",
+                    start_seconds=1,
+                    end_seconds=2,
+                ),
+            ],
+        )
 
 
 def test_models_reject_unknown_fields_and_invalid_values() -> None:

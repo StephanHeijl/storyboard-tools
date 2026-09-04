@@ -193,7 +193,8 @@ class StoryboardService:
         connection.execute(
             "INSERT INTO shot_revisions(id, shot_id, revision_number, title, description, prompt, "
             "negative_prompt, duration_seconds, render_mode, seed, adapter, render_settings_json, "
-            "notes_json, content_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "notes_json, dialogue_json, content_hash, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 revision_id,
                 shot_id,
@@ -208,6 +209,7 @@ class StoryboardService:
                 shot.adapter,
                 _json(shot.render_settings),
                 _json(shot.notes),
+                _json([cue.model_dump(mode="json") for cue in shot.dialogue]),
                 content_hash,
                 _now(),
             ),
@@ -278,7 +280,7 @@ class StoryboardService:
                 "SELECT s.id AS shot_id, s.shot_key, vs.position, vs.archived_at, "
                 "sr.id AS revision_id, sr.revision_number, sr.title, sr.description, sr.prompt, "
                 "sr.negative_prompt, sr.duration_seconds, sr.render_mode, sr.seed, sr.adapter, "
-                "sr.render_settings_json, sr.notes_json, sr.content_hash "
+                "sr.render_settings_json, sr.notes_json, sr.dialogue_json, sr.content_hash "
                 "FROM version_shots vs JOIN shots s ON s.id = vs.shot_id "
                 "JOIN shot_revisions sr ON sr.id = vs.revision_id "
                 f"WHERE vs.version_id = ? {archived_clause} ORDER BY vs.position",
@@ -289,6 +291,7 @@ class StoryboardService:
             result = dict(row)
             result["render_settings"] = json.loads(result.pop("render_settings_json"))
             result["notes"] = json.loads(result.pop("notes_json"))
+            result["dialogue"] = json.loads(result.pop("dialogue_json"))
             results.append(result)
         return results
 
@@ -408,6 +411,242 @@ class StoryboardService:
         for item in result:
             item["approved"] = bool(item["approved"])
         return result
+
+    def plan_board_frame(
+        self, version_name: str, position: int, *, seed: int | None = None, settings: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        with self.database.transaction(write=True) as connection:
+            version = self._version(connection, version_name)
+            shot = self._active_shot_row(connection, version["id"], position)
+            attempt = int(
+                connection.execute(
+                    "SELECT COALESCE(MAX(attempt_number), 0) + 1 FROM board_frames WHERE revision_id = ?",
+                    (shot["revision_id"],),
+                ).fetchone()[0]
+            )
+            frame_id = _id()
+            base = f"boards/{version_name}/frames/{position:04d}-r{shot['revision_number']:03d}-a{attempt:03d}"
+            prompt = (
+                f"Storyboard keyframe. {shot['description']} "
+                "No captions, subtitles, speech bubbles, labels, logos, or written text."
+            )
+            resolved_seed = int(
+                seed if seed is not None else (shot["seed"] if shot["seed"] is not None else secrets.randbits(63))
+            )
+            connection.execute(
+                "INSERT INTO board_frames(id, revision_id, version_id, position_snapshot, attempt_number, "
+                "state, seed, prompt_snapshot, settings_json, workflow_path, output_path, created_at) "
+                "VALUES (?, ?, ?, ?, ?, 'planned', ?, ?, ?, ?, ?, ?)",
+                (
+                    frame_id,
+                    shot["revision_id"],
+                    version["id"],
+                    position,
+                    attempt,
+                    resolved_seed,
+                    prompt,
+                    _json(settings or {}),
+                    f"{base}.workflow.json",
+                    f"{base}.png",
+                    _now(),
+                ),
+            )
+            return self.board_frame_details(frame_id, connection=connection)
+
+    def board_frame_details(self, frame_id: str, *, connection: sqlite3.Connection | None = None) -> dict[str, Any]:
+        def read(conn: sqlite3.Connection) -> dict[str, Any]:
+            row = conn.execute(
+                "SELECT bf.*, sv.name AS version, s.shot_key, sr.description, sr.duration_seconds, "
+                "sr.dialogue_json FROM board_frames bf "
+                "JOIN storyboard_versions sv ON sv.id=bf.version_id "
+                "JOIN shot_revisions sr ON sr.id=bf.revision_id "
+                "JOIN shots s ON s.id=sr.shot_id WHERE bf.id=?",
+                (frame_id,),
+            ).fetchone()
+            if row is None:
+                raise NotFound(f"board frame not found: {frame_id}")
+            result = dict(row)
+            result["frame_id"] = result.pop("id")
+            result["settings"] = json.loads(result.pop("settings_json"))
+            result["dialogue"] = json.loads(result.pop("dialogue_json"))
+            return result
+
+        if connection is not None:
+            return read(connection)
+        with self.database.connect() as conn:
+            return read(conn)
+
+    def transition_board_frame(
+        self, frame_id: str, state: str, *, comfy_prompt_id: str | None = None, error_message: str | None = None
+    ) -> dict[str, Any]:
+        allowed = {
+            "planned": {"submitting", "failed", "cancelled"},
+            "submitting": {"queued", "failed", "cancelled"},
+            "queued": {"running", "completed", "failed", "timed_out", "cancelled"},
+            "running": {"completed", "failed", "timed_out", "cancelled"},
+            "timed_out": {"running", "completed", "failed", "cancelled"},
+            "completed": set(),
+            "failed": set(),
+            "cancelled": set(),
+        }
+        with self.database.transaction(write=True) as connection:
+            current = self.board_frame_details(frame_id, connection=connection)
+            if state not in allowed.get(current["state"], set()):
+                raise Conflict(f"invalid board frame transition: {current['state']} -> {state}")
+            connection.execute(
+                "UPDATE board_frames SET state=?, comfy_prompt_id=COALESCE(?, comfy_prompt_id), "
+                "error_message=? WHERE id=?",
+                (state, comfy_prompt_id, error_message, frame_id),
+            )
+        return self.board_frame_details(frame_id)
+
+    def complete_board_frame(self, frame_id: str) -> dict[str, Any]:
+        details = self.board_frame_details(frame_id)
+        output = resolve_project_path(self.project_root, details["output_path"], must_exist=True)
+        digest = file_sha256(output)
+        with self.database.transaction(write=True) as connection:
+            current = self.board_frame_details(frame_id, connection=connection)
+            if current["state"] == "completed" and current["output_sha256"] == digest:
+                return current
+            updated = connection.execute(
+                "UPDATE board_frames SET state='completed', output_sha256=?, completed_at=? "
+                "WHERE id=? AND state IN ('queued','running')",
+                (digest, _now(), frame_id),
+            )
+            if updated.rowcount != 1:
+                raise Conflict(f"board frame cannot be completed from state: {current['state']}")
+        return self.board_frame_details(frame_id)
+
+    def list_board_frames(self, version_name: str, *, position: int | None = None) -> list[dict[str, Any]]:
+        with self.database.connect() as connection:
+            version = self._version(connection, version_name)
+            query = (
+                "SELECT id FROM board_frames WHERE version_id=?"
+                + (" AND position_snapshot=?" if position is not None else "")
+                + " ORDER BY position_snapshot, attempt_number"
+            )
+            values: tuple[Any, ...] = (version["id"], position) if position is not None else (version["id"],)
+            ids = [row[0] for row in connection.execute(query, values).fetchall()]
+        return [self.board_frame_details(frame_id) for frame_id in ids]
+
+    def latest_board_frames(self, version_name: str) -> list[dict[str, Any]]:
+        shots = self.list_shots(version_name)
+        result: list[dict[str, Any]] = []
+        with self.database.connect() as connection:
+            version = self._version(connection, version_name)
+            for shot in shots:
+                row = connection.execute(
+                    "SELECT id FROM board_frames WHERE version_id=? AND revision_id=? AND state='completed' "
+                    "ORDER BY attempt_number DESC LIMIT 1",
+                    (version["id"], shot["revision_id"]),
+                ).fetchone()
+                if row is None:
+                    raise Conflict(f"shot {shot['position']} has no completed rapid-board frame")
+                result.append(self.board_frame_details(row[0], connection=connection))
+        return result
+
+    def plan_board_preview(self, version_name: str, settings: dict[str, Any]) -> dict[str, Any]:
+        with self.database.transaction(write=True) as connection:
+            version = self._version(connection, version_name)
+            shots = connection.execute(
+                "SELECT vs.position, vs.revision_id FROM version_shots vs "
+                "WHERE vs.version_id=? AND vs.archived_at IS NULL ORDER BY vs.position",
+                (version["id"],),
+            ).fetchall()
+            frames: list[dict[str, Any]] = []
+            for shot in shots:
+                row = connection.execute(
+                    "SELECT id FROM board_frames WHERE version_id=? AND revision_id=? AND state='completed' "
+                    "ORDER BY attempt_number DESC LIMIT 1",
+                    (version["id"], shot["revision_id"]),
+                ).fetchone()
+                if row is None:
+                    raise Conflict(f"shot {shot['position']} has no completed rapid-board frame")
+                frames.append(self.board_frame_details(row["id"], connection=connection))
+            number = int(
+                connection.execute(
+                    "SELECT COALESCE(MAX(preview_number),0)+1 FROM board_previews WHERE version_id=?",
+                    (version["id"],),
+                ).fetchone()[0]
+            )
+            preview_id = _id()
+            base = f"boards/{version_name}/previews/preview-{number:03d}"
+            connection.execute(
+                "INSERT INTO board_previews(id,version_id,preview_number,storyboard_snapshot,state,"
+                "settings_json,manifest_path,output_path,created_at) VALUES (?,?,?,?, 'building',?,?,?,?)",
+                (
+                    preview_id,
+                    version["id"],
+                    number,
+                    version["snapshot"],
+                    _json(settings),
+                    f"{base}.json",
+                    f"{base}.mp4",
+                    _now(),
+                ),
+            )
+            return {
+                "preview_id": preview_id,
+                "version_id": version["id"],
+                "snapshot": version["snapshot"],
+                "base": base,
+                "frames": frames,
+            }
+
+    def finalize_board_preview(self, preview_id: str, *, digest: str, duration_seconds: float) -> None:
+        with self.database.transaction(write=True) as connection:
+            row = connection.execute("SELECT * FROM board_previews WHERE id=?", (preview_id,)).fetchone()
+            if row is None:
+                raise NotFound(f"board preview not found: {preview_id}")
+            if row["output_sha256"] != digest or row["duration_seconds"] != duration_seconds:
+                raise Conflict("board preview publication has not been prepared with these artifacts")
+            current_snapshot = connection.execute(
+                "SELECT snapshot FROM storyboard_versions WHERE id=?", (row["version_id"],)
+            ).fetchone()[0]
+            if current_snapshot != row["storyboard_snapshot"]:
+                raise Conflict("storyboard changed while the rapid preview was building")
+            updated = connection.execute(
+                "UPDATE board_previews SET state='completed',output_sha256=?,duration_seconds=?,completed_at=? "
+                "WHERE id=? AND state='building'",
+                (digest, duration_seconds, _now(), preview_id),
+            )
+            if updated.rowcount != 1:
+                raise Conflict("board preview is no longer building")
+
+    def prepare_board_preview(self, preview_id: str, *, digest: str, duration_seconds: float) -> dict[str, Any]:
+        with self.database.transaction(write=True) as connection:
+            row = connection.execute("SELECT * FROM board_previews WHERE id=?", (preview_id,)).fetchone()
+            if row is None:
+                raise NotFound(f"board preview not found: {preview_id}")
+            if row["state"] != "building":
+                raise Conflict("board preview is no longer building")
+            current_snapshot = connection.execute(
+                "SELECT snapshot FROM storyboard_versions WHERE id=?", (row["version_id"],)
+            ).fetchone()[0]
+            if current_snapshot != row["storyboard_snapshot"]:
+                raise Conflict("storyboard changed while the rapid preview was building")
+            connection.execute(
+                "UPDATE board_previews SET output_sha256=?,duration_seconds=? WHERE id=?",
+                (digest, duration_seconds, preview_id),
+            )
+            return dict(row)
+
+    def board_preview_details(self, preview_id: str) -> dict[str, Any]:
+        with self.database.connect() as connection:
+            row = connection.execute("SELECT * FROM board_previews WHERE id=?", (preview_id,)).fetchone()
+        if row is None:
+            raise NotFound(f"board preview not found: {preview_id}")
+        result = dict(row)
+        result["preview_id"] = result.pop("id")
+        result["settings"] = json.loads(result.pop("settings_json"))
+        return result
+
+    def fail_board_preview(self, preview_id: str, error: str) -> None:
+        with self.database.transaction(write=True) as connection:
+            connection.execute(
+                "UPDATE board_previews SET state='failed',error_message=? WHERE id=? AND state='building'",
+                (error, preview_id),
+            )
 
     def list_quality_reports(
         self,
@@ -603,6 +842,7 @@ class StoryboardService:
                 "adapter": row["adapter"],
                 "render_settings": json.loads(row["render_settings_json"]),
                 "notes": json.loads(row["notes_json"]),
+                "dialogue": json.loads(row["dialogue_json"]),
                 "assets": assets,
                 "links": links,
                 "music": music,
@@ -1511,7 +1751,7 @@ class StoryboardService:
         with self.database.connect() as connection:
             row = connection.execute(
                 "SELECT r.*, sr.prompt, sr.negative_prompt, sr.duration_seconds AS intended_duration_seconds, "
-                "sr.render_mode, sr.adapter FROM renders r JOIN shot_revisions sr "
+                "sr.render_mode, sr.adapter, sr.dialogue_json FROM renders r JOIN shot_revisions sr "
                 "ON sr.id = r.revision_id WHERE r.id = ?",
                 (render_id,),
             ).fetchone()
@@ -1530,6 +1770,7 @@ class StoryboardService:
         result = dict(row)
         result["render_id"] = result.pop("id")
         result["settings"] = json.loads(result.pop("settings_json"))
+        result["dialogue"] = json.loads(result.pop("dialogue_json"))
         result["assets"] = assets
         return result
 

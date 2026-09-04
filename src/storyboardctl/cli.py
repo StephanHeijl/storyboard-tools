@@ -11,6 +11,8 @@ from typing import Any
 import typer
 from pydantic import ValidationError
 
+from storyboardctl.boarding import BoardRunner
+from storyboardctl.boarding import preflight as board_preflight_check
 from storyboardctl.comfy.client import ComfyClient, ComfySettings
 from storyboardctl.comfy.h3 import H3Adapter
 from storyboardctl.compiler import CompilationSettings, Compiler
@@ -18,6 +20,7 @@ from storyboardctl.database import Database
 from storyboardctl.errors import StoryboardError, ValidationFailure
 from storyboardctl.models import AssetKind, ProjectSpec, ShotSpec
 from storyboardctl.output import json_text, table_text
+from storyboardctl.preview import PreviewBuilder, PreviewSettings, ffmpeg_has_subtitles
 from storyboardctl.quality import QualityInspector
 from storyboardctl.rendering import RenderRunner
 from storyboardctl.service import StoryboardService
@@ -38,6 +41,7 @@ compile_app = typer.Typer(help="Create manifests and assemble approved renders."
 production_app = typer.Typer(help="Inspect production-wide state and readiness.")
 comfy_app = typer.Typer(help="Inspect the configured ComfyUI service.")
 qc_app = typer.Typer(help="Discover persisted media quality reports.")
+board_app = typer.Typer(help="Create rapid visual storyboards with Z-Image Turbo.")
 app.add_typer(import_app, name="import")
 app.add_typer(storyboard_app, name="storyboard")
 app.add_typer(shot_app, name="shot")
@@ -48,6 +52,7 @@ app.add_typer(compile_app, name="compile")
 app.add_typer(production_app, name="production")
 app.add_typer(comfy_app, name="comfy")
 app.add_typer(qc_app, name="qc")
+app.add_typer(board_app, name="board")
 
 
 @dataclass(frozen=True)
@@ -161,6 +166,7 @@ def doctor(context: typer.Context) -> None:
             "database_exists": state.database.path.is_file(),
             "ffmpeg": shutil.which("ffmpeg"),
             "ffprobe": shutil.which("ffprobe"),
+            "ffmpeg_subtitles": bool(shutil.which("ffmpeg")) and ffmpeg_has_subtitles(),
             "comfy_url_configured": bool(ComfySettings.from_environment().base_url),
         }
 
@@ -188,6 +194,112 @@ def comfy_preflight(context: typer.Context) -> None:
         return _comfy_client().preflight(nodes=requirements["nodes"], models=requirements["models"])
 
     _execute(context, operation)
+
+
+@board_app.command("preflight")
+def board_preflight(context: typer.Context) -> None:
+    _execute(context, lambda: board_preflight_check(_comfy_client()))
+
+
+@board_app.command("frame")
+def board_frame(
+    context: typer.Context,
+    version: str,
+    position: int,
+    seed: int | None = typer.Option(None, "--seed"),
+    width: int = typer.Option(1344, "--width"),
+    height: int = typer.Option(768, "--height"),
+    steps: int = typer.Option(8, "--steps"),
+    plan_only: bool = typer.Option(False, "--plan-only"),
+) -> None:
+    def operation() -> dict[str, Any]:
+        service = _service(context)
+        planned = service.plan_board_frame(
+            version, position, seed=seed, settings={"width": width, "height": height, "steps": steps}
+        )
+        return planned if plan_only else BoardRunner(service, _comfy_client()).execute(planned["frame_id"])
+
+    _execute(context, operation)
+
+
+@board_app.command("render")
+def board_render(
+    context: typer.Context,
+    version: str,
+    width: int = typer.Option(1344, "--width"),
+    height: int = typer.Option(768, "--height"),
+    steps: int = typer.Option(8, "--steps"),
+) -> None:
+    def operation() -> dict[str, Any]:
+        service = _service(context)
+        runner = BoardRunner(service, _comfy_client())
+        rendered = []
+        for shot in service.list_shots(version):
+            completed = [
+                f
+                for f in service.list_board_frames(version, position=shot["position"])
+                if f["revision_id"] == shot["revision_id"] and f["state"] == "completed"
+            ]
+            if completed:
+                rendered.append(completed[-1])
+                continue
+            planned = service.plan_board_frame(
+                version, shot["position"], settings={"width": width, "height": height, "steps": steps}
+            )
+            rendered.append(runner.execute(planned["frame_id"]))
+        return {"version": version, "frames": rendered}
+
+    _execute(context, operation)
+
+
+@board_app.command("list")
+def board_list(context: typer.Context, version: str, position: int | None = typer.Option(None, "--position")) -> None:
+    _execute(context, lambda: _service(context).list_board_frames(version, position=position))
+
+
+@board_app.command("build")
+def board_build(context: typer.Context, version: str, width: int = 1344, height: int = 768, fps: int = 24) -> None:
+    _execute(context, lambda: PreviewBuilder(_service(context)).build(version, PreviewSettings(width, height, fps)))
+
+
+@board_app.command("create")
+def board_create(
+    context: typer.Context, version: str, width: int = 1344, height: int = 768, fps: int = 24, steps: int = 8
+) -> None:
+    def operation() -> dict[str, Any]:
+        client = _comfy_client()
+        check = board_preflight_check(client)
+        if not check["ok"]:
+            raise ValidationFailure("Z-Image Turbo preflight failed", details=check)
+        service = _service(context)
+        runner = BoardRunner(service, client)
+        frames = []
+        for shot in service.list_shots(version):
+            existing = [
+                f
+                for f in service.list_board_frames(version, position=shot["position"])
+                if f["revision_id"] == shot["revision_id"] and f["state"] == "completed"
+            ]
+            frames.append(
+                existing[-1]
+                if existing
+                else runner.execute(
+                    service.plan_board_frame(
+                        version, shot["position"], settings={"width": width, "height": height, "steps": steps}
+                    )["frame_id"]
+                )
+            )
+        return {
+            "frames": frames,
+            "preview": PreviewBuilder(service).build(version, PreviewSettings(width, height, fps)),
+        }
+
+    _execute(context, operation)
+
+
+@board_app.command("reconcile")
+def board_reconcile(context: typer.Context, preview_id: str) -> None:
+    _execute(context, lambda: PreviewBuilder(_service(context)).reconcile(preview_id))
 
 
 @import_app.command("spec")

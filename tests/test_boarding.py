@@ -1,0 +1,179 @@
+from __future__ import annotations
+
+import shutil
+import subprocess
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from storyboardctl.boarding import BoardRunner
+from storyboardctl.database import Database
+from storyboardctl.errors import Conflict, IntegrityFailure
+from storyboardctl.models import DialogueCueSpec, ProjectSpec, ShotSpec, StoryboardSpec
+from storyboardctl.paths import file_sha256
+from storyboardctl.preview import PreviewBuilder, PreviewSettings, ass_document, ffmpeg_has_subtitles
+from storyboardctl.service import StoryboardService
+
+
+class FakeComfy:
+    def enqueue(self, workflow: dict[str, dict[str, Any]]) -> str:
+        assert workflow["10"]["class_type"] == "SaveImage"
+        return "image-job"
+
+    def wait_for_completion(self, prompt_id: str, *, timeout_seconds: float, poll_seconds: float) -> dict[str, Any]:
+        return {"outputs": {"10": {"images": [{"filename": "frame.png"}]}}}
+
+    def download_image(self, history_entry: dict[str, Any], destination: Path) -> Path:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"png")
+        return destination
+
+
+def _service(tmp_path: Path) -> StoryboardService:
+    database = Database(tmp_path / "storyboard.db")
+    database.initialize()
+    service = StoryboardService(database, tmp_path)
+    service.import_spec(
+        ProjectSpec(
+            slug="rapid",
+            title="Rapid",
+            storyboard=StoryboardSpec(
+                name="v1",
+                title="V1",
+                shots=[
+                    ShotSpec(
+                        key="s1",
+                        title="Arrival",
+                        description="Two friends arrive at a colorful theme park.",
+                        prompt="Full video prompt",
+                        duration_seconds=3,
+                        dialogue=[
+                            DialogueCueSpec(
+                                speaker="Alice", speaker_id="S1", text="We made it!", start_seconds=0.5, end_seconds=1.8
+                            )
+                        ],
+                    )
+                ],
+            ),
+        )
+    )
+    return service
+
+
+def test_board_frame_is_versioned_and_runner_persists_provenance(tmp_path) -> None:
+    service = _service(tmp_path)
+    planned = service.plan_board_frame("v1", 10, seed=7)
+    assert "Two friends arrive" in planned["prompt_snapshot"]
+    assert "Full video prompt" not in planned["prompt_snapshot"]
+    assert planned["dialogue"][0]["text"] == "We made it!"
+
+    completed = BoardRunner(service, FakeComfy()).execute(planned["frame_id"], poll_seconds=0)
+    assert completed["state"] == "completed"
+    assert completed["output_sha256"]
+    assert service.latest_board_frames("v1")[0]["frame_id"] == planned["frame_id"]
+    assert service.plan_board_frame("v1", 10)["attempt_number"] == 2
+
+
+def test_board_frame_completion_is_state_checked_and_idempotent(tmp_path) -> None:
+    service = _service(tmp_path)
+    planned = service.plan_board_frame("v1", 10)
+    output = tmp_path / planned["output_path"]
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_bytes(b"png")
+    with pytest.raises(Conflict, match="planned"):
+        service.complete_board_frame(planned["frame_id"])
+    service.transition_board_frame(planned["frame_id"], "submitting")
+    service.transition_board_frame(planned["frame_id"], "queued")
+    first = service.complete_board_frame(planned["frame_id"])
+    second = service.complete_board_frame(planned["frame_id"])
+    assert second["output_sha256"] == first["output_sha256"]
+
+
+def test_cloned_version_does_not_reuse_another_versions_board_attempt(tmp_path) -> None:
+    service = _service(tmp_path)
+    planned = service.plan_board_frame("v1", 10)
+    output = tmp_path / planned["output_path"]
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_bytes(b"png")
+    service.transition_board_frame(planned["frame_id"], "submitting")
+    service.transition_board_frame(planned["frame_id"], "queued")
+    service.complete_board_frame(planned["frame_id"])
+    service.clone_storyboard("v1", "v2")
+    with pytest.raises(Conflict, match="no completed rapid-board frame"):
+        service.plan_board_preview("v2", {})
+
+
+def test_preview_rejects_tampered_source_before_ffmpeg(tmp_path, monkeypatch) -> None:
+    service = _service(tmp_path)
+    planned = service.plan_board_frame("v1", 10)
+    output = tmp_path / planned["output_path"]
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_bytes(b"original")
+    service.transition_board_frame(planned["frame_id"], "submitting")
+    service.transition_board_frame(planned["frame_id"], "queued")
+    service.complete_board_frame(planned["frame_id"])
+    output.write_bytes(b"tampered")
+    monkeypatch.setattr("storyboardctl.preview.ffmpeg_has_subtitles", lambda: True)
+    with pytest.raises(IntegrityFailure, match="hash mismatch"):
+        PreviewBuilder(service).build("v1")
+
+
+def test_prepared_preview_can_be_reconciled_after_interrupted_publish(tmp_path) -> None:
+    service = _service(tmp_path)
+    planned = service.plan_board_frame("v1", 10)
+    frame_output = tmp_path / planned["output_path"]
+    frame_output.parent.mkdir(parents=True, exist_ok=True)
+    frame_output.write_bytes(b"frame")
+    service.transition_board_frame(planned["frame_id"], "submitting")
+    service.transition_board_frame(planned["frame_id"], "queued")
+    service.complete_board_frame(planned["frame_id"])
+    plan = service.plan_board_preview("v1", {"width": 320, "height": 180, "fps": 8})
+    details = service.board_preview_details(plan["preview_id"])
+    output = tmp_path / details["output_path"]
+    manifest = tmp_path / details["manifest_path"]
+    output.parent.mkdir(parents=True, exist_ok=True)
+    staged_output = output.with_name(f".{output.name}.{plan['preview_id']}.part.mp4")
+    staged_manifest = manifest.with_name(f".{manifest.name}.{plan['preview_id']}.part")
+    staged_output.write_bytes(b"video")
+    staged_manifest.write_text('{"storyboard_snapshot": 0}\n', encoding="utf-8")
+    service.prepare_board_preview(plan["preview_id"], digest=file_sha256(staged_output), duration_seconds=3)
+
+    reconciled = PreviewBuilder(service).reconcile(plan["preview_id"])
+    assert reconciled["state"] == "completed"
+    assert output.read_bytes() == b"video"
+    assert manifest.is_file()
+
+
+def test_ass_subtitles_use_exact_dialogue_timing() -> None:
+    document = ass_document(
+        [
+            {"start_seconds": 1.25, "end_seconds": 2.5, "text": "Hello {there}"},
+        ],
+        1280,
+        720,
+    )
+    assert "Dialogue: 0,0:00:01.25,0:00:02.50" in document
+    assert r"Hello \{there\}" in document
+
+
+def test_preview_builder_creates_animated_subtitled_video(tmp_path) -> None:
+    if shutil.which("ffmpeg") is None or not ffmpeg_has_subtitles():
+        return
+    service = _service(tmp_path)
+    planned = service.plan_board_frame("v1", 10, seed=7, settings={"width": 320, "height": 180})
+    image = tmp_path / planned["output_path"]
+    image.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=blue:s=320x180", "-frames:v", "1", str(image)],
+        check=True,
+        capture_output=True,
+    )
+    service.transition_board_frame(planned["frame_id"], "submitting")
+    service.transition_board_frame(planned["frame_id"], "queued", comfy_prompt_id="local")
+    service.complete_board_frame(planned["frame_id"])
+
+    preview = PreviewBuilder(service).build("v1", PreviewSettings(width=320, height=180, fps=8))
+    assert preview["state"] == "completed"
+    assert (tmp_path / preview["output_path"]).stat().st_size > 0
+    assert (tmp_path / preview["manifest_path"]).is_file()

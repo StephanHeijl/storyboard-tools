@@ -6,6 +6,7 @@ from typing import Any
 from storyboardctl.comfy.adapters import WorkflowContext
 from storyboardctl.errors import Conflict
 from storyboardctl.models import RenderMode
+from storyboardctl.prompts import compile_h3_prompt
 
 
 @dataclass(frozen=True)
@@ -131,9 +132,11 @@ class H3Adapter:
                 "class_type": "SaveVideo",
             },
         }
-        effective_prompt = context.prompt
-        if context.negative_prompt:
-            effective_prompt = f"{effective_prompt}\n\nAVOID: {context.negative_prompt}"
+        effective_prompt = compile_h3_prompt(
+            context.prompt,
+            dialogue=context.dialogue,
+            negative_prompt=context.negative_prompt,
+        )
         conditioning: dict[str, Any] = {
             "clip": ["2", 0],
             "vae": ["3", 0],

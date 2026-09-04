@@ -5,7 +5,7 @@ import json
 import httpx
 import pytest
 
-from storyboardctl.comfy.client import ComfyClient, ComfySettings, discover_video_output
+from storyboardctl.comfy.client import ComfyClient, ComfySettings, discover_image_output, discover_video_output
 from storyboardctl.errors import ExternalServiceFailure
 
 
@@ -84,6 +84,18 @@ def test_execution_errors_and_missing_outputs_are_clear() -> None:
 def test_video_discovery_is_recursive() -> None:
     output = {"a": [{"nested": {"filename": "ignore.png"}}, {"filename": "movie.webm"}]}
     assert discover_video_output(output)["filename"] == "movie.webm"
+
+
+def test_image_discovery_and_download_are_recursive(tmp_path) -> None:
+    output = {"a": [{"nested": {"filename": "frame.webp", "subfolder": "boards"}}]}
+    assert discover_image_output(output)["filename"] == "frame.webp"
+    client = ComfyClient(
+        ComfySettings(base_url="http://comfy.test"),
+        http_client=httpx.Client(transport=httpx.MockTransport(lambda _request: httpx.Response(200, content=b"image"))),
+    )
+    target = tmp_path / "frame.webp"
+    client.download_image({"outputs": output}, target)
+    assert target.read_bytes() == b"image"
 
 
 def test_download_streams_to_a_staged_file(tmp_path) -> None:

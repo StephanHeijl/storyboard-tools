@@ -14,6 +14,7 @@ Storyboard Tools keeps shots, revisions, assets, render attempts, approvals, and
 | Storyboards | Typed Pydantic authoring, JSON import, numbered shots, immutable revisions, and cheap version snapshots |
 | Media | Project-relative assets with hashes, roles, music relationships, and first/last-frame continuity |
 | Generation | ComfyUI connectivity, H3 workflow construction, collision-proof attempts, retry, rerender, and recovery |
+| Rapid boards | Z-Image Turbo keyframes, timed dialogue subtitles, and animated preview cuts before video rendering |
 | Review | Technical QC, contact sheets, explicit approve/reject history, and selected renders |
 | Delivery | Deterministic manifests, full `ffmpeg` assembly, compilation approval, and selected-cut discovery |
 | Automation | JSON-first commands, stable exit codes, idempotency keys, and no interactive prompts |
@@ -52,7 +53,7 @@ Every render and compilation is a new immutable attempt. Rejections preserve his
 | Requirement | Purpose |
 |---|---|
 | [uv](https://docs.astral.sh/uv/getting-started/installation/) | Installs Python, creates the managed project environment, and resolves the lockfile |
-| `ffmpeg` and `ffprobe` | Render probing, contact sheets, continuity-frame extraction, QC, and final assembly |
+| `ffmpeg` and `ffprobe` | Render probing, contact sheets, continuity-frame extraction, QC, and final assembly; rapid previews require an `ffmpeg` build with the libass `subtitles` filter |
 | ComfyUI-compatible server | Accepts workflow, upload, history, queue, and output-download requests |
 | MiniMax H3 nodes and models | Provides text/image/reference-conditioned video generation |
 
@@ -122,6 +123,28 @@ Model names are configurable in Python through `H3Models`. `storyboardctl comfy 
 
 </details>
 
+<details>
+<summary>Bundled Z-Image Turbo adapter requirements</summary>
+
+Rapid visual storyboarding uses the official ComfyUI Z-Image Turbo graph with these model filenames:
+
+- `z_image_turbo_int8_convrot.safetensors` (diffusion model)
+- `qwen_3_4b_fp8_mixed.safetensors` (text encoder)
+- `ae.safetensors` (VAE)
+
+Install them in the corresponding ComfyUI model directories, then run `storyboardctl board preflight`. The tool never
+downloads multi-gigabyte models automatically. The preflight reports missing nodes and filenames before a job is queued.
+
+Alternative official model variants can be selected without renaming files:
+
+```bash
+export STORYBOARDCTL_ZIMAGE_MODEL='z_image_turbo_bf16.safetensors'
+export STORYBOARDCTL_ZIMAGE_TEXT_ENCODER='qwen_3_4b.safetensors'
+export STORYBOARDCTL_ZIMAGE_VAE='ae.safetensors'
+```
+
+</details>
+
 ## Start a production
 
 Create a directory for the production, generate or write a structured spec, then import it:
@@ -162,6 +185,30 @@ project = ProjectSpec(
 )
 
 Path("project.json").write_text(project.model_dump_json(indent=2))
+```
+
+Dialogue is structured and timed relative to its shot. H3 prompts compile it to MiniMax's native `(S1)` and
+`<d>[English] ...</d>` notation; rapid previews use the same timing for exact burned-in subtitles:
+
+```python
+from storyboardctl.models import DialogueCueSpec
+
+ShotSpec(
+    key="arrival",
+    title="Arrival",
+    description="Two friends arrive beneath a glowing entrance sign.",
+    prompt="A lively handheld arrival shot with synchronized dialogue.",
+    duration_seconds=4,
+    dialogue=[
+        DialogueCueSpec(
+            speaker="Alice",
+            speaker_id="S1",
+            text="We made it!",
+            start_seconds=0.8,
+            end_seconds=2.0,
+        )
+    ],
+)
 ```
 
 Unknown fields, broken asset/shot/music references, duplicate keys, unsafe paths, invalid durations, and conflicting positions fail validation before the database changes.
@@ -241,6 +288,41 @@ uv run storyboardctl comfy preflight
 `retry` preserves the exact seed and settings. `rerender` keeps the settings and selects a new random seed unless one is supplied. Every attempt gets a monotonic attempt number and UUID fragment; files are never overwritten.
 
 Approving a completed render selects it for that exact shot revision and supersedes the earlier selection without deleting review history. Storyboard clones share that approval while they share the revision. Editing prompt, duration, render settings, assets, frames, or other render-relevant data creates a revision with no approval.
+
+## Rapid visual storyboarding
+
+Validate a sequence cheaply before spending time on full H3 video renders:
+
+```bash
+storyboardctl board preflight
+storyboardctl board frame v1 10                 # render or rerender one keyframe
+storyboardctl board frame v1 20 --plan-only    # persist a plan without contacting ComfyUI
+storyboardctl board render v1                  # fill missing frames for active revisions
+storyboardctl board build v1                   # animated, subtitled MP4 from completed frames
+storyboardctl board create v1                  # preflight + render missing + build
+storyboardctl board list v1 --position 20
+storyboardctl board reconcile PREVIEW_ID       # finish an interrupted prepared preview publish
+```
+
+Each image prompt comes from the shot description, with written text explicitly excluded so dialogue does not leak into
+the generated image. Each attempt records its seed, settings, workflow snapshot, output path, hash, and ComfyUI prompt ID.
+The preview selects the newest completed frame for each active shot revision, applies a restrained alternating slide/zoom,
+burns timed dialogue with `ffmpeg`/libass, and records an immutable manifest and output hash. It intentionally has no audio.
+Preview publication records a recoverable prepared state before atomically moving files, so an interrupted finalization can
+be resumed by ID without rebuilding or accepting unverified artifacts.
+
+This creates a second, faster review loop before the full video path:
+
+```mermaid
+flowchart LR
+    A["Structured storyboard"] --> B["Z-Image Turbo keyframes"]
+    B --> C["Animated subtitle preview"]
+    C --> D{"Story and timing work?"}
+    D -- "No" --> E["Revise shots or dialogue"]
+    E --> B
+    D -- "Yes" --> F["Full MiniMax H3 renders"]
+    F --> G["Approve and compile final cut"]
+```
 
 ## Assets and music
 

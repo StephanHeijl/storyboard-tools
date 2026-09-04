@@ -267,5 +267,48 @@ CREATE TABLE render_finalization_claims (
 );
 """
 
+MIGRATION_4 = """
+ALTER TABLE shot_revisions ADD COLUMN dialogue_json TEXT NOT NULL DEFAULT '[]';
 
-MIGRATIONS: tuple[tuple[int, str], ...] = ((1, MIGRATION_1), (2, MIGRATION_2), (3, MIGRATION_3))
+CREATE TABLE board_frames (
+    id TEXT PRIMARY KEY,
+    revision_id TEXT NOT NULL REFERENCES shot_revisions(id) ON DELETE RESTRICT,
+    version_id TEXT NOT NULL REFERENCES storyboard_versions(id) ON DELETE RESTRICT,
+    position_snapshot INTEGER NOT NULL CHECK (position_snapshot > 0),
+    attempt_number INTEGER NOT NULL CHECK (attempt_number > 0),
+    state TEXT NOT NULL CHECK (
+        state IN ('planned','submitting','queued','running','timed_out','completed','failed','cancelled')
+    ),
+    seed INTEGER NOT NULL CHECK (seed >= 0),
+    prompt_snapshot TEXT NOT NULL,
+    settings_json TEXT NOT NULL,
+    workflow_path TEXT NOT NULL UNIQUE,
+    comfy_prompt_id TEXT UNIQUE,
+    output_path TEXT NOT NULL UNIQUE,
+    output_sha256 TEXT,
+    error_message TEXT,
+    created_at TEXT NOT NULL,
+    completed_at TEXT,
+    UNIQUE (revision_id, attempt_number)
+);
+
+CREATE TABLE board_previews (
+    id TEXT PRIMARY KEY,
+    version_id TEXT NOT NULL REFERENCES storyboard_versions(id) ON DELETE RESTRICT,
+    preview_number INTEGER NOT NULL CHECK (preview_number > 0),
+    storyboard_snapshot INTEGER NOT NULL CHECK (storyboard_snapshot >= 0),
+    state TEXT NOT NULL CHECK (state IN ('planned','building','completed','failed')),
+    settings_json TEXT NOT NULL,
+    manifest_path TEXT NOT NULL UNIQUE,
+    output_path TEXT NOT NULL UNIQUE,
+    output_sha256 TEXT,
+    duration_seconds REAL CHECK (duration_seconds IS NULL OR duration_seconds > 0),
+    error_message TEXT,
+    created_at TEXT NOT NULL,
+    completed_at TEXT,
+    UNIQUE (version_id, preview_number)
+);
+"""
+
+
+MIGRATIONS: tuple[tuple[int, str], ...] = ((1, MIGRATION_1), (2, MIGRATION_2), (3, MIGRATION_3), (4, MIGRATION_4))

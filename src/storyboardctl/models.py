@@ -47,6 +47,23 @@ class MusicRelationship(StrEnum):
     associated = "associated"
 
 
+class DialogueCueSpec(StrictModel):
+    speaker: str = Field(min_length=1)
+    speaker_id: str = Field(pattern=r"^S[1-9][0-9]*$")
+    text: str = Field(min_length=1)
+    language: str = Field(default="English", min_length=1)
+    start_seconds: float = Field(ge=0)
+    end_seconds: float = Field(gt=0)
+
+    @model_validator(mode="after")
+    def validate_interval(self) -> Self:
+        if self.end_seconds <= self.start_seconds:
+            raise ValueError("dialogue cue end_seconds must be after start_seconds")
+        if "<d>" in self.text or "</d>" in self.text:
+            raise ValueError("dialogue text cannot contain reserved H3 dialogue tags")
+        return self
+
+
 def _validate_relative_path(value: str) -> str:
     path = PurePosixPath(value.replace("\\", "/"))
     if not value or path.is_absolute() or ".." in path.parts or path.as_posix() in ("", "."):
@@ -107,6 +124,7 @@ class ShotSpec(StrictModel):
     assets: list[ShotAssetSpec] = Field(default_factory=list)
     links: list[ShotLinkSpec] = Field(default_factory=list)
     music: dict[str, MusicRelationship] = Field(default_factory=dict)
+    dialogue: list[DialogueCueSpec] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -114,6 +132,19 @@ class ShotSpec(StrictModel):
         identities = [(item.role, item.order) for item in self.assets]
         if len(identities) != len(set(identities)):
             raise ValueError("shot asset role/order pairs must be unique")
+        previous_end = 0.0
+        speakers_by_id: dict[str, str] = {}
+        ids_by_speaker: dict[str, str] = {}
+        for cue in self.dialogue:
+            if cue.end_seconds > self.duration_seconds:
+                raise ValueError("dialogue cue must end within the shot duration")
+            if cue.start_seconds < previous_end:
+                raise ValueError("dialogue cues cannot overlap and must be chronological")
+            previous_end = cue.end_seconds
+            if speakers_by_id.setdefault(cue.speaker_id, cue.speaker) != cue.speaker:
+                raise ValueError("a dialogue speaker ID must identify exactly one speaker per shot")
+            if ids_by_speaker.setdefault(cue.speaker, cue.speaker_id) != cue.speaker_id:
+                raise ValueError("a dialogue speaker must use exactly one speaker ID per shot")
         return self
 
 
